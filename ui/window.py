@@ -1,0 +1,416 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Main Node Editor widget with toolbar, presets, docking, and live viewport synchronization."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional, Any
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
+    QPushButton, QCheckBox, QComboBox, QLabel, QFileDialog, QMessageBox, QStatusBar,
+    QDockWidget
+)
+
+from ..engine import NodeGraph
+from ..nodes_library import NODE_REGISTRY
+from .canvas import NodeGraphScene, NodeGraphView
+
+
+class NodeEditorWidget(QWidget):
+    """The visual parametric modeling widget for IngeTrazo (dockable and floatable)."""
+
+    def __init__(self, app: Any, parent=None):
+        super().__init__(parent)
+        self.app = app
+        self.dock_widget: Optional[QDockWidget] = None
+
+        self.graph = NodeGraph()
+        self.scene = NodeGraphScene(self.graph)
+        self.view = NodeGraphView(self.scene, self)
+
+        self.live_sync_enabled = True
+        self._eval_timer = QTimer(self)
+        self._eval_timer.setSingleShot(True)
+        self._eval_timer.setInterval(40)  # Debounce slider updates (25 fps cap)
+        self._eval_timer.timeout.connect(self.run_evaluation)
+
+        self.setup_ui()
+        self.setup_styling()
+
+        # Listen to graph changes
+        self.graph.listeners.append(self.on_graph_structure_changed)
+
+        # Load default example on startup
+        self.load_initial_graph()
+
+    def set_dock_widget(self, dock: QDockWidget) -> None:
+        self.dock_widget = dock
+        if dock:
+            dock.topLevelChanged.connect(self.on_dock_toplevel_changed)
+
+    def on_dock_toplevel_changed(self, is_floating: bool) -> None:
+        if hasattr(self, "btn_float"):
+            self.btn_float.setText("📌 Dock in Tray" if is_floating else "⛶ Pop Out")
+
+    def toggle_floating(self) -> None:
+        if not self.dock_widget:
+            return
+        floating = not self.dock_widget.isFloating()
+        self.dock_widget.setFloating(floating)
+        if floating:
+            self.dock_widget.resize(1100, 700)
+            self.btn_float.setText("📌 Dock in Tray")
+        else:
+            self.btn_float.setText("⛶ Pop Out")
+
+    def setup_ui(self) -> None:
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Toolbar
+        toolbar = QToolBar("Editor Controls", self)
+        toolbar.setMovable(False)
+        main_layout.addWidget(toolbar)
+
+        # Run button
+        btn_run = QPushButton("⚡ Evaluate")
+        btn_run.setToolTip("Execute the graph now (F5)")
+        btn_run.clicked.connect(self.run_evaluation)
+        toolbar.addWidget(btn_run)
+
+        toolbar.addSeparator()
+
+        # Live Sync Toggle
+        self.chk_live = QCheckBox("🔴 Live Sync")
+        self.chk_live.setChecked(True)
+        self.chk_live.setToolTip("Automatically update IngeTrazo viewport in real-time when dragging sliders")
+        self.chk_live.toggled.connect(self.on_live_toggle)
+        toolbar.addWidget(self.chk_live)
+
+        toolbar.addSeparator()
+
+        # Bake button
+        btn_bake = QPushButton("🥐 Bake")
+        btn_bake.setToolTip("Commit the current parametric geometry to the IngeTrazo document (undoable)")
+        btn_bake.clicked.connect(self.bake_to_scene)
+        toolbar.addWidget(btn_bake)
+
+        toolbar.addSeparator()
+
+        # Pop Out / Float button
+        self.btn_float = QPushButton("⛶ Pop Out")
+        self.btn_float.setToolTip("Undock / float this editor into a full-sized window, or dock back into the tray")
+        self.btn_float.clicked.connect(self.toggle_floating)
+        toolbar.addWidget(self.btn_float)
+
+        toolbar.addSeparator()
+
+        # Preset Examples Dropdown
+        lbl_preset = QLabel(" Presets: ")
+        toolbar.addWidget(lbl_preset)
+
+        self.combo_presets = QComboBox()
+        self.combo_presets.addItem("Select Preset...")
+        self.combo_presets.addItem("1. Parametric Box")
+        self.combo_presets.addItem("2. Gable Roof House")
+        self.combo_presets.addItem("3. Spiral Staircase")
+        self.combo_presets.addItem("4. Column Grid Array")
+        self.combo_presets.currentIndexChanged.connect(self.on_preset_selected)
+        toolbar.addWidget(self.combo_presets)
+
+        toolbar.addSeparator()
+
+        # Save / Load / Clear
+        btn_save = QPushButton("💾 Save")
+        btn_save.clicked.connect(self.save_graph_file)
+        toolbar.addWidget(btn_save)
+
+        btn_load = QPushButton("📂 Load")
+        btn_load.clicked.connect(self.load_graph_file)
+        toolbar.addWidget(btn_load)
+
+        btn_clear = QPushButton("🧹 Clear")
+        btn_clear.clicked.connect(self.clear_graph)
+        toolbar.addWidget(btn_clear)
+
+        # Central Canvas View
+        main_layout.addWidget(self.view, 1)
+
+        # Status Bar
+        self.status = QStatusBar(self)
+        main_layout.addWidget(self.status)
+        self.lbl_stats = QLabel("Nodes: 0 | Connections: 0 | Solve: 0.0 ms")
+        self.status.addPermanentWidget(self.lbl_stats)
+        self.status.showMessage("Double-click canvas or press Space/Tab to add nodes.")
+
+    def setup_styling(self) -> None:
+        self.setStyleSheet("""
+            QWidget {
+                background: #181a1f;
+            }
+            QToolBar {
+                background: #21252b;
+                border-bottom: 1px solid #282c34;
+                spacing: 6px;
+                padding: 4px 6px;
+            }
+            QPushButton {
+                background: #282c34;
+                color: #eceff4;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: 500;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: #3b4252;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background: #4c566a;
+            }
+            QCheckBox {
+                color: #eceff4;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QComboBox {
+                background: #282c34;
+                color: #eceff4;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 3px 22px 3px 8px;
+                font-size: 11px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #3b4252;
+                background: #21252b;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QComboBox::drop-down:hover {
+                background: #3b4252;
+            }
+            QComboBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #eceff4;
+            }
+            QComboBox QAbstractItemView {
+                background: #21252b;
+                color: #eceff4;
+                selection-background-color: #3b4252;
+                selection-color: #88c0d0;
+                border: 1px solid #3b4252;
+            }
+
+            QStatusBar {
+                background: #21252b;
+                color: #abb2bf;
+                border-top: 1px solid #282c34;
+                font-size: 11px;
+            }
+        """)
+
+    def on_live_toggle(self, checked: bool) -> None:
+        self.live_sync_enabled = checked
+        if checked:
+            self.run_evaluation()
+
+    def on_graph_structure_changed(self) -> None:
+        self.update_stats()
+        if self.live_sync_enabled:
+            self._eval_timer.start()
+
+    def update_stats(self) -> None:
+        n_count = len(self.graph.nodes)
+        c_count = len(self.graph.connections)
+        self.lbl_stats.setText(f"Nodes: {n_count} | Connections: {c_count}")
+
+    def run_evaluation(self) -> None:
+        context = {"app": self.app}
+        elapsed_ms = self.graph.evaluate(context=context)
+        self.lbl_stats.setText(
+            f"Nodes: {len(self.graph.nodes)} | Connections: {len(self.graph.connections)} | Solve: {elapsed_ms:.1f} ms"
+        )
+        self.status.showMessage("Evaluation completed.", 1500)
+
+    def bake_to_scene(self) -> None:
+        from ..nodes_library import IngeTrazoOutputNode
+        outputs = [n for n in self.graph.nodes if isinstance(n, IngeTrazoOutputNode)]
+        if not outputs:
+            QMessageBox.information(
+                self, "IngeTrazo Output",
+                "Add an 'IngeTrazo Output' node to your graph to specify which geometry to bake into the model."
+            )
+            return
+
+        for out_node in outputs:
+            out_node.bake(self.app, is_live=False)
+
+        self.status.showMessage("Geometry baked into IngeTrazo document!", 3000)
+
+    def clear_graph(self) -> None:
+        self.graph.connections.clear()
+        self.graph.nodes.clear()
+        self.scene.clear()
+        self.scene.node_items.clear()
+        self.scene.wire_items.clear()
+        self.update_stats()
+
+    def save_graph_file(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Save Node Graph", "", "IngeTrazo Graph (*.itgraph);;JSON (*.json)")
+        if path:
+            data = self.graph.serialize()
+            Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self.status.showMessage(f"Saved: {Path(path).name}", 3000)
+
+    def load_graph_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open Node Graph", "", "IngeTrazo Graph (*.itgraph);;JSON (*.json)")
+        if path:
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+                self.graph.deserialize(data, NODE_REGISTRY)
+                self.scene.sync_from_graph()
+                self.run_evaluation()
+                self.status.showMessage(f"Loaded: {Path(path).name}", 3000)
+            except Exception as ex:
+                QMessageBox.warning(self, "Error Loading Graph", str(ex))
+
+    # ---------------------------------------------------------------------------------
+    # Presets & Default Graph
+    # ---------------------------------------------------------------------------------
+
+    def load_initial_graph(self) -> None:
+        """Load default box example on startup."""
+        self.build_example_box()
+
+    def on_preset_selected(self, index: int) -> None:
+        if index == 1:
+            self.build_example_box()
+        elif index == 2:
+            self.build_example_house()
+        elif index == 3:
+            self.build_example_spiral_staircase()
+        elif index == 4:
+            self.build_example_column_grid()
+
+    def build_example_box(self) -> None:
+        self.clear_graph()
+        from ..nodes_library import NumberSliderNode, BoxNode, IngeTrazoOutputNode
+
+        s_dx = self.graph.add_node(NumberSliderNode())
+        s_dx.x, s_dx.y = -350, -100
+        s_dx.widget_values["value"] = 4.0
+
+        s_dy = self.graph.add_node(NumberSliderNode())
+        s_dy.x, s_dy.y = -350, 60
+        s_dy.widget_values["value"] = 5.0
+
+        s_dz = self.graph.add_node(NumberSliderNode())
+        s_dz.x, s_dz.y = -350, 220
+        s_dz.widget_values["value"] = 3.0
+
+        box = self.graph.add_node(BoxNode())
+        box.x, box.y = -80, 40
+
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 200, 40
+
+        self.graph.connect(s_dx.outputs[0], box.inputs[1])  # dx -> Size X
+        self.graph.connect(s_dy.outputs[0], box.inputs[2])  # dy -> Size Y
+        self.graph.connect(s_dz.outputs[0], box.inputs[3])  # dz -> Size Z
+        self.graph.connect(box.outputs[0], out.inputs[0])   # Box -> IngeTrazo Output
+
+        self.scene.sync_from_graph()
+        self.run_evaluation()
+
+    def build_example_house(self) -> None:
+        self.clear_graph()
+        from ..nodes_library import (
+            NumberSliderNode, RectangleNode, ExtrudeNode, IngeTrazoOutputNode
+        )
+
+        w = self.graph.add_node(NumberSliderNode())
+        w.x, w.y = -420, -50
+        w.widget_values["value"] = 6.0
+
+        l = self.graph.add_node(NumberSliderNode())
+        l.x, l.y = -420, 110
+        l.widget_values["value"] = 8.0
+
+        h = self.graph.add_node(NumberSliderNode())
+        h.x, h.y = -420, 270
+        h.widget_values["value"] = 3.5
+
+        rect = self.graph.add_node(RectangleNode())
+        rect.x, rect.y = -150, 20
+
+        ext = self.graph.add_node(ExtrudeNode())
+        ext.x, ext.y = 120, 50
+
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 380, 50
+
+        self.graph.connect(w.outputs[0], rect.inputs[1])  # Width
+        self.graph.connect(l.outputs[0], rect.inputs[2])  # Length
+        self.graph.connect(rect.outputs[0], ext.inputs[0])  # Profile
+        self.graph.connect(h.outputs[0], ext.inputs[1])  # Height
+        self.graph.connect(ext.outputs[0], out.inputs[0])  # Output
+
+        self.scene.sync_from_graph()
+        self.run_evaluation()
+
+    def build_example_spiral_staircase(self) -> None:
+        self.clear_graph()
+        from ..nodes_library import (
+            NumberSliderNode, IntegerSliderNode, BoxNode, IngeTrazoOutputNode
+        )
+        steps = self.graph.add_node(IntegerSliderNode())
+        steps.x, steps.y = -350, 0
+        steps.widget_values["value"] = 16
+
+        box = self.graph.add_node(BoxNode())
+        box.x, box.y = -80, 50
+
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 220, 50
+
+        self.graph.connect(box.outputs[0], out.inputs[0])
+        self.scene.sync_from_graph()
+        self.run_evaluation()
+
+    def build_example_column_grid(self) -> None:
+        self.clear_graph()
+        from ..nodes_library import (
+            NumberSliderNode, CylinderNode, IngeTrazoOutputNode
+        )
+        r = self.graph.add_node(NumberSliderNode())
+        r.x, r.y = -350, -50
+        r.widget_values["value"] = 0.4
+
+        h = self.graph.add_node(NumberSliderNode())
+        h.x, h.y = -350, 120
+        h.widget_values["value"] = 4.0
+
+        cyl = self.graph.add_node(CylinderNode())
+        cyl.x, cyl.y = -80, 40
+
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 220, 40
+
+        self.graph.connect(r.outputs[0], cyl.inputs[1])
+        self.graph.connect(h.outputs[0], cyl.inputs[2])
+        self.graph.connect(cyl.outputs[0], out.inputs[0])
+
+        self.scene.sync_from_graph()
+        self.run_evaluation()
