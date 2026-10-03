@@ -204,6 +204,12 @@ class NodeInspectorPanel(QWidget):
             if w:
                 w.deleteLater()
 
+        self._param_spin_min = None
+        self._param_spin_max = None
+        self._param_spin_dec = None
+        self._param_spin_val = None
+        self._param_slider = None
+
         if not node:
             return
 
@@ -314,6 +320,7 @@ class NodeInspectorPanel(QWidget):
             grid.addWidget(spin_max, 1, 1)
 
             # Decimals (for float)
+            spin_dec = None
             if not is_int:
                 grid.addWidget(QLabel("Decimals:"), 2, 0)
                 spin_dec = QSpinBox()
@@ -346,19 +353,51 @@ class NodeInspectorPanel(QWidget):
             grid.addWidget(slider, row_idx + 1, 0, 1, 2)
             lay.addLayout(grid)
 
+            self._param_spin_min = spin_min
+            self._param_spin_max = spin_max
+            self._param_spin_dec = spin_dec
+            self._param_spin_val = spin_val
+            self._param_slider = slider
+
             def update_slider_model():
                 if self._syncing:
                     return
-                node.widget_values["min"] = spin_min.value()
-                node.widget_values["max"] = spin_max.value()
-                if not is_int:
+                mn = spin_min.value()
+                mx = spin_max.value()
+                if mx <= mn:
+                    mx = mn + 1.0
+                    spin_max.blockSignals(True)
+                    spin_max.setValue(mx)
+                    spin_max.blockSignals(False)
+
+                node.widget_values["min"] = mn
+                node.widget_values["max"] = mx
+                if not is_int and spin_dec is not None:
                     dec = spin_dec.value()
                     node.widget_values["decimals"] = dec
                     spin_min.setDecimals(dec)
                     spin_max.setDecimals(dec)
                     spin_val.setDecimals(dec)
-                node.widget_values["value"] = spin_val.value()
-                spin_val.setRange(spin_min.value(), spin_max.value())
+
+                cur_v = min(mx, max(mn, spin_val.value()))
+                node.widget_values["value"] = int(round(cur_v)) if is_int else float(cur_v)
+
+                spin_val.blockSignals(True)
+                spin_val.setRange(mn, mx)
+                spin_val.setValue(cur_v)
+                spin_val.blockSignals(False)
+
+                steps_now = int(round(mx - mn)) if is_int else 1000
+                slider.blockSignals(True)
+                slider.setMaximum(max(1, steps_now))
+                if is_int:
+                    tick = int(round(cur_v - mn))
+                else:
+                    ratio = (cur_v - mn) / (mx - mn) if mx > mn else 0.0
+                    tick = int(round(ratio * 1000))
+                slider.setValue(max(0, min(steps_now, tick)))
+                slider.blockSignals(False)
+
                 node.dirty = True
 
                 if self.current_node_item and hasattr(self.current_node_item, "update_slider_range"):
@@ -373,26 +412,54 @@ class NodeInspectorPanel(QWidget):
                 mn = spin_min.value()
                 mx = spin_max.value()
                 if is_int:
-                    spin_val.setValue(int(mn + val))
+                    num = int(round(mn + val))
                 else:
-                    ratio = val / 1000.0
-                    spin_val.setValue(mn + ratio * (mx - mn))
+                    max_ticks = float(slider.maximum()) or 1000.0
+                    ratio = val / max_ticks
+                    num = mn + ratio * (mx - mn)
+
+                spin_val.blockSignals(True)
+                spin_val.setValue(num)
+                spin_val.blockSignals(False)
+
+                node.widget_values["value"] = int(num) if is_int else float(num)
+                node.dirty = True
+
+                if self.current_node_item and hasattr(self.current_node_item, "update_slider_range"):
+                    self.current_node_item.update_slider_range()
+
+                if self.current_scene:
+                    self.current_scene.notify_graph_changed()
 
             def on_spin_val(v):
                 if self._syncing:
                     return
                 mn = spin_min.value()
                 mx = spin_max.value()
+                v = min(mx, max(mn, v))
+                steps_now = int(round(mx - mn)) if is_int else 1000
+                slider.blockSignals(True)
+                slider.setMaximum(max(1, steps_now))
                 if is_int:
-                    slider.setValue(int(round(v - mn)))
+                    tick = int(round(v - mn))
                 else:
                     ratio = (v - mn) / (mx - mn) if mx > mn else 0.0
-                    slider.setValue(int(round(ratio * 1000)))
-                update_slider_model()
+                    tick = int(round(ratio * 1000))
+                slider.setValue(max(0, min(steps_now, tick)))
+                slider.blockSignals(False)
+
+                node.widget_values["value"] = int(v) if is_int else float(v)
+                node.dirty = True
+
+                if self.current_node_item and hasattr(self.current_node_item, "update_slider_range"):
+                    self.current_node_item.update_slider_range()
+
+                if self.current_scene:
+                    self.current_scene.notify_graph_changed()
 
             spin_min.valueChanged.connect(update_slider_model)
             spin_max.valueChanged.connect(update_slider_model)
-            if not is_int:
+            if not is_int and spin_dec is not None:
                 spin_dec.valueChanged.connect(update_slider_model)
             spin_val.valueChanged.connect(on_spin_val)
             slider.valueChanged.connect(on_panel_slider)
@@ -647,11 +714,38 @@ class NodeInspectorPanel(QWidget):
         self.content_layout.addWidget(sec_box)
 
     def refresh_values(self) -> None:
-        """Lightweight update of output preview values after an evaluation."""
-        if not self.current_node or not hasattr(self, "_output_labels"):
+        """Lightweight update of output preview values and parameter controls after an evaluation."""
+        if not self.current_node:
             return
-        for port, lbl in self._output_labels.items():
-            lbl.setText(self._format_value_preview(port.value))
+
+        # 1. Update outputs preview
+        if hasattr(self, "_output_labels") and self._output_labels:
+            for port, lbl in self._output_labels.items():
+                lbl.setText(self._format_value_preview(port.value))
+
+        # 2. Update parameter controls in-place if node is slider
+        if (hasattr(self, "_param_spin_val") and self._param_spin_val is not None
+                and hasattr(self, "_param_slider") and self._param_slider is not None):
+            val = float(self.current_node.widget_values.get("value", 0.0))
+            mn = float(self.current_node.widget_values.get("min", 0.0))
+            mx = float(self.current_node.widget_values.get("max", 50.0))
+            is_int = (self.current_node.__class__.__name__ == "IntegerSliderNode")
+
+            self._param_spin_val.blockSignals(True)
+            self._param_spin_val.setRange(mn, mx)
+            self._param_spin_val.setValue(val if not is_int else int(round(val)))
+            self._param_spin_val.blockSignals(False)
+
+            steps_now = int(round(mx - mn)) if is_int else 1000
+            self._param_slider.blockSignals(True)
+            self._param_slider.setMaximum(max(1, steps_now))
+            if is_int:
+                tick = int(round(val - mn))
+            else:
+                ratio = (val - mn) / (mx - mn) if mx > mn else 0.0
+                tick = int(round(ratio * 1000))
+            self._param_slider.setValue(max(0, min(steps_now, tick)))
+            self._param_slider.blockSignals(False)
 
     def _format_value_preview(self, val: Any) -> str:
         if val is None:

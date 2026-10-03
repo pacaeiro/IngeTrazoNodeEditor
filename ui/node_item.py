@@ -245,13 +245,16 @@ class NodeItem(QGraphicsObject):
                 if syncing[0]:
                     return
                 syncing[0] = True
+                cur_min = float(self.node.widget_values.get("min", 0.0))
+                cur_max = float(self.node.widget_values.get("max", 50.0 if not is_int else 100.0))
                 if is_int:
-                    num = int(min_val + val)
+                    num = int(round(cur_min + val))
                 else:
-                    ratio = val / 1000.0
-                    num = min_val + ratio * (max_val - min_val)
+                    max_ticks = float(slider.maximum()) or 1000.0
+                    ratio = val / max_ticks
+                    num = cur_min + ratio * (cur_max - cur_min)
                 spin.setValue(num)
-                self.node.widget_values["value"] = num
+                self.node.widget_values["value"] = int(num) if is_int else float(num)
                 self.node.dirty = True
                 if self.scene():
                     self.scene().notify_graph_changed()
@@ -261,12 +264,16 @@ class NodeItem(QGraphicsObject):
                 if syncing[0]:
                     return
                 syncing[0] = True
+                cur_min = float(self.node.widget_values.get("min", 0.0))
+                cur_max = float(self.node.widget_values.get("max", 50.0 if not is_int else 100.0))
+                steps_now = int(round(cur_max - cur_min)) if is_int else 1000
+                slider.setMaximum(max(1, steps_now))
                 if is_int:
-                    tick = int(round(num - min_val))
+                    tick = int(round(num - cur_min))
                 else:
-                    ratio = (num - min_val) / (max_val - min_val) if max_val > min_val else 0.0
+                    ratio = (num - cur_min) / (cur_max - cur_min) if cur_max > cur_min else 0.0
                     tick = int(round(ratio * 1000))
-                slider.setValue(max(0, min(steps, tick)))
+                slider.setValue(max(0, min(steps_now, tick)))
                 self.node.widget_values["value"] = int(num) if is_int else float(num)
                 self.node.dirty = True
                 if self.scene():
@@ -539,6 +546,9 @@ class NodeItem(QGraphicsObject):
             max_val = float(self.node.widget_values.get("max", 50.0 if not is_int else 100.0))
             cur_val = float(self.node.widget_values.get("value", 5.0 if not is_int else 10))
             decimals = int(self.node.widget_values.get("decimals", 2 if not is_int else 0))
+
+            cur_val = min(max_val, max(min_val, cur_val))
+            self.node.widget_values["value"] = int(round(cur_val)) if is_int else cur_val
 
             self.spin_widget.blockSignals(True)
             self.slider_widget.blockSignals(True)
