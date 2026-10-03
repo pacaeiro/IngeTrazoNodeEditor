@@ -22,6 +22,51 @@ def register_node(cls: type) -> type:
     return cls
 
 
+def _safe_ln(v: float) -> float:
+    try:
+        fv = float(v)
+        if fv > 1e-15:
+            return math.log(fv)
+        elif fv < -1e-15:
+            return math.log(abs(fv))
+        return -34.54
+    except Exception:
+        return 0.0
+
+
+def _safe_log(v: float, base: Optional[float] = None) -> float:
+    try:
+        fv = float(v)
+        val = fv if fv > 1e-15 else (abs(fv) if abs(fv) > 1e-15 else 1e-15)
+        if base is not None:
+            return math.log(val, float(base))
+        return math.log(val)
+    except Exception:
+        return 0.0
+
+
+def _safe_sqrt(v: float) -> float:
+    try:
+        fv = float(v)
+        return math.sqrt(fv if fv >= 0 else abs(fv))
+    except Exception:
+        return 0.0
+
+
+def _safe_asin(v: float) -> float:
+    try:
+        return math.asin(max(-1.0, min(1.0, float(v))))
+    except Exception:
+        return 0.0
+
+
+def _safe_acos(v: float) -> float:
+    try:
+        return math.acos(max(-1.0, min(1.0, float(v))))
+    except Exception:
+        return 0.0
+
+
 # Safe evaluation environment for math expressions
 MATH_ENV: Dict[str, Any] = {
     # Constants
@@ -30,33 +75,49 @@ MATH_ENV: Dict[str, Any] = {
     "e": math.e,
     "E": math.e,
     "tau": math.tau,
+    "TAU": math.tau,
     "phi": (1.0 + math.sqrt(5.0)) / 2.0,
     # Trigonometric functions
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
-    "asin": math.asin,
-    "acos": math.acos,
+    "asin": _safe_asin,
+    "acos": _safe_acos,
     "atan": math.atan,
     "atan2": math.atan2,
     "sinh": math.sinh,
     "cosh": math.cosh,
     "tanh": math.tanh,
-    # Powers, Roots, Exponentials
-    "sqrt": math.sqrt,
-    "cbrt": (lambda v: math.copysign(abs(v) ** (1.0 / 3.0), v)) if not hasattr(math, "cbrt") else math.cbrt,
+    "SIN": math.sin,
+    "COS": math.cos,
+    "TAN": math.tan,
+    # Logarithmic & Exponential
+    "ln": _safe_ln,
+    "LN": _safe_ln,
+    "log": _safe_log,
+    "LOG": _safe_log,
+    "log10": (lambda v: math.log10(v if v > 1e-15 else (abs(v) if abs(v) > 1e-15 else 1e-15))),
+    "LOG10": (lambda v: math.log10(v if v > 1e-15 else (abs(v) if abs(v) > 1e-15 else 1e-15))),
+    "log2": (lambda v: math.log2(v if v > 1e-15 else (abs(v) if abs(v) > 1e-15 else 1e-15))),
+    "LOG2": (lambda v: math.log2(v if v > 1e-15 else (abs(v) if abs(v) > 1e-15 else 1e-15))),
     "exp": math.exp,
-    "log": math.log,
-    "log10": math.log10,
-    "log2": math.log2,
+    "EXP": math.exp,
+    # Powers & Roots
+    "sqrt": _safe_sqrt,
+    "SQRT": _safe_sqrt,
+    "cbrt": (lambda v: math.copysign(abs(v) ** (1.0 / 3.0), v)),
     "pow": pow,
+    "sq": (lambda v: float(v) * float(v)),
     # Rounding & Signs
     "abs": abs,
+    "ABS": abs,
     "round": round,
     "floor": math.floor,
     "ceil": math.ceil,
     "min": min,
     "max": max,
+    "clamp": (lambda v, mn, mx: max(mn, min(mx, v))),
+    "lerp": (lambda a, b, t: a + (b - a) * t),
     # Geometric utilities
     "hypot": math.hypot,
     "deg": math.degrees,

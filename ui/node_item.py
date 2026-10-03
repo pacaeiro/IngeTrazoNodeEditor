@@ -459,8 +459,14 @@ class NodeItem(QGraphicsObject):
             painter.setPen(QPen(QColor("#88c0d0"), 2.0))
         elif self.node.error:
             painter.setPen(QPen(QColor("#bf616a"), 2.0))
+            err_tip = f"❌ {self.node.error}"
+            if self.toolTip() != err_tip:
+                self.setToolTip(err_tip)
         else:
             painter.setPen(QPen(QColor("#333842"), 1.2))
+            desc_tip = self.node.description or self.node.name
+            if self.toolTip() != desc_tip:
+                self.setToolTip(desc_tip)
 
         painter.setBrush(QBrush(card_color))
         painter.drawPath(bg_path)
