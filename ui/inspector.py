@@ -34,6 +34,7 @@ class NodeInspectorPanel(QWidget):
         self.current_node_item: Optional[Any] = None
         self.current_scene: Optional[Any] = None
         self._syncing = False
+        self.is_pinned = False
 
         self.setMinimumWidth(280)
         self.setMaximumWidth(340)
@@ -58,6 +59,15 @@ class NodeInspectorPanel(QWidget):
         font = QFont("Segoe UI", 10, QFont.Bold)
         lbl_title.setFont(font)
         header_layout.addWidget(lbl_title, 1)
+
+        self.btn_pin = QPushButton("📌")
+        self.btn_pin.setObjectName("inspector_pin")
+        self.btn_pin.setCheckable(True)
+        self.btn_pin.setChecked(False)
+        self.btn_pin.setToolTip("Pin side panel (keep open when unselected)")
+        self.btn_pin.setFixedSize(22, 22)
+        self.btn_pin.clicked.connect(self.toggle_pin)
+        header_layout.addWidget(self.btn_pin, 0)
 
         btn_close = QPushButton("✕")
         btn_close.setObjectName("inspector_close")
@@ -97,6 +107,24 @@ class NodeInspectorPanel(QWidget):
             #inspector_title {
                 color: #88c0d0;
                 font-size: 12px;
+                font-weight: bold;
+            }
+            #inspector_pin {
+                background: transparent;
+                color: #d8dee9;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                font-size: 11px;
+                padding: 0px;
+            }
+            #inspector_pin:hover {
+                background: #3b4252;
+                color: #ffffff;
+            }
+            #inspector_pin:checked {
+                background: #88c0d0;
+                color: #1e222b;
+                border: 1px solid #88c0d0;
                 font-weight: bold;
             }
             #inspector_close {
@@ -183,7 +211,20 @@ class NodeInspectorPanel(QWidget):
             }
         """)
 
+    def toggle_pin(self) -> None:
+        """Toggle pinning of the side inspector panel."""
+        self.is_pinned = self.btn_pin.isChecked()
+        self.btn_pin.setToolTip(
+            "Unpin side panel (auto-hide when unselected)"
+            if self.is_pinned
+            else "Pin side panel (keep open when unselected)"
+        )
+
     def close_panel(self) -> None:
+        self.is_pinned = False
+        if hasattr(self, "btn_pin"):
+            self.btn_pin.setChecked(False)
+            self.btn_pin.setToolTip("Pin side panel (keep open when unselected)")
         self.hide()
         try:
             if self.current_scene:

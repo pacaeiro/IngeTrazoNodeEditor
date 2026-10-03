@@ -244,6 +244,9 @@ class NodeEditorWidget(QWidget):
 
     def on_graph_structure_changed(self) -> None:
         self.update_stats()
+        if hasattr(self, "inspector") and self.inspector.current_node:
+            if self.inspector.current_node not in self.graph.nodes:
+                self.inspector.close_panel()
         if self.live_sync_enabled:
             self._eval_timer.start()
 
@@ -265,7 +268,8 @@ class NodeEditorWidget(QWidget):
             self.inspector.populate(item.node, item, self.scene)
             self.inspector.show()
         else:
-            self.inspector.hide()
+            if not getattr(self.inspector, "is_pinned", False):
+                self.inspector.hide()
 
     def run_evaluation(self) -> None:
         context = {"app": self.app}
@@ -293,6 +297,8 @@ class NodeEditorWidget(QWidget):
         self.status.showMessage("Geometry baked into IngeTrazo document!", 3000)
 
     def clear_graph(self) -> None:
+        if hasattr(self, "inspector"):
+            self.inspector.close_panel()
         self.graph.connections.clear()
         self.graph.nodes.clear()
         self.scene.clear()
@@ -311,6 +317,8 @@ class NodeEditorWidget(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Open Node Graph", "", "IngeTrazo Graph (*.itgraph);;JSON (*.json)")
         if path:
             try:
+                if hasattr(self, "inspector"):
+                    self.inspector.close_panel()
                 data = json.loads(Path(path).read_text(encoding="utf-8"))
                 self.graph.deserialize(data, NODE_REGISTRY)
                 self.scene.sync_from_graph()
