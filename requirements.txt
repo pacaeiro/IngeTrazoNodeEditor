@@ -4,6 +4,7 @@
 # This plugin vendors pure-Python libraries directly in the package folder
 # so they work without any pip install step.
 #
+# Code help: https://github.com/botffy/polyskel
 # ─────────────────────────────────────────────────────────────
 # VENDORED (already included — no install required)
 # ─────────────────────────────────────────────────────────────
