@@ -113,6 +113,7 @@ class NodeBase:
 
     def __init__(self, node_id: Optional[str] = None):
         self.id = node_id or str(uuid.uuid4())
+        self.name: str = self.__class__.name
         self.x: float = 0.0
         self.y: float = 0.0
         self.inputs: List[Port] = []
@@ -200,12 +201,15 @@ class NodeBase:
         return {
             "id": self.id,
             "type": self.__class__.__name__,
+            "name": self.name,
             "x": self.x,
             "y": self.y,
             "widgets": self.widget_values
         }
 
     def deserialize(self, data: dict) -> None:
+        if "name" in data:
+            self.name = str(data["name"])
         self.x = data.get("x", 0.0)
         self.y = data.get("y", 0.0)
         self.widget_values.update(data.get("widgets", {}))

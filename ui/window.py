@@ -10,12 +10,14 @@ from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
     QPushButton, QCheckBox, QComboBox, QLabel, QFileDialog, QMessageBox, QStatusBar,
-    QDockWidget
+    QDockWidget, QSplitter
 )
 
 from ..engine import NodeGraph
 from ..nodes_library import NODE_REGISTRY
 from .canvas import NodeGraphScene, NodeGraphView
+from .node_item import NodeItem
+from .inspector import NodeInspectorPanel
 
 
 class NodeEditorWidget(QWidget):
@@ -29,6 +31,8 @@ class NodeEditorWidget(QWidget):
         self.graph = NodeGraph()
         self.scene = NodeGraphScene(self.graph)
         self.view = NodeGraphView(self.scene, self)
+        self.inspector = NodeInspectorPanel(self)
+        self.inspector.hide()
 
         self.live_sync_enabled = True
         self._eval_timer = QTimer(self)
@@ -39,8 +43,9 @@ class NodeEditorWidget(QWidget):
         self.setup_ui()
         self.setup_styling()
 
-        # Listen to graph changes
+        # Listen to graph and selection changes
         self.graph.listeners.append(self.on_graph_structure_changed)
+        self.scene.selectionChanged.connect(self.on_selection_changed)
 
         # Load default example on startup
         self.load_initial_graph()
@@ -137,8 +142,15 @@ class NodeEditorWidget(QWidget):
         btn_clear.clicked.connect(self.clear_graph)
         toolbar.addWidget(btn_clear)
 
-        # Central Canvas View
-        main_layout.addWidget(self.view, 1)
+        # Central Canvas View & Inspector Panel
+        self.splitter = QSplitter(Qt.Horizontal, self)
+        self.splitter.addWidget(self.view)
+        self.splitter.addWidget(self.inspector)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, True)
+        main_layout.addWidget(self.splitter, 1)
 
         # Status Bar
         self.status = QStatusBar(self)
@@ -237,12 +249,29 @@ class NodeEditorWidget(QWidget):
         c_count = len(self.graph.connections)
         self.lbl_stats.setText(f"Nodes: {n_count} | Connections: {c_count}")
 
+    def on_selection_changed(self) -> None:
+        try:
+            if not hasattr(self, "scene") or self.scene is None:
+                return
+            selected = [it for it in self.scene.selectedItems() if isinstance(it, NodeItem)]
+        except RuntimeError:
+            return
+
+        if len(selected) == 1:
+            item = selected[0]
+            self.inspector.populate(item.node, item, self.scene)
+            self.inspector.show()
+        else:
+            self.inspector.hide()
+
     def run_evaluation(self) -> None:
         context = {"app": self.app}
         elapsed_ms = self.graph.evaluate(context=context)
         self.lbl_stats.setText(
             f"Nodes: {len(self.graph.nodes)} | Connections: {len(self.graph.connections)} | Solve: {elapsed_ms:.1f} ms"
         )
+        if hasattr(self, "inspector") and not self.inspector.isHidden():
+            self.inspector.refresh_values()
         self.status.showMessage("Evaluation completed.", 1500)
 
     def bake_to_scene(self) -> None:

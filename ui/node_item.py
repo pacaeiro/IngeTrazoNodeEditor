@@ -84,6 +84,10 @@ class NodeItem(QGraphicsObject):
         self.input_ports: List[PortItem] = []
         self.output_ports: List[PortItem] = []
         self.widget_proxy: Optional[QGraphicsProxyWidget] = None
+        self.slider_widget: Optional[QSlider] = None
+        self.spin_widget: Optional[QDoubleSpinBox] = None
+        self.expr_line_edit: Optional[QLineEdit] = None
+        self.panel_pte: Optional[QPlainTextEdit] = None
         self.width = self.MIN_WIDTH
         self.height = 80.0
 
@@ -272,6 +276,9 @@ class NodeItem(QGraphicsObject):
             slider.valueChanged.connect(on_slider_moved)
             spin.valueChanged.connect(on_spin_changed)
 
+            self.slider_widget = slider
+            self.spin_widget = spin
+
             layout.addWidget(slider, 1)
             layout.addWidget(spin, 0)
 
@@ -347,6 +354,7 @@ class NodeItem(QGraphicsObject):
                 if self.scene():
                     self.scene().notify_graph_changed()
 
+            self.expr_line_edit = le
             le.textChanged.connect(on_expr_changed)
             layout.addWidget(le)
 
@@ -428,6 +436,7 @@ class NodeItem(QGraphicsObject):
                 syncing[0] = False
 
             self.node.on_display_updated = update_panel_ui
+            self.panel_pte = pte
             pte.textChanged.connect(on_panel_text)
             layout.addWidget(pte)
 
@@ -520,6 +529,51 @@ class NodeItem(QGraphicsObject):
                     wire.update_path()
 
         self.update()
+
+    def update_slider_range(self) -> None:
+        """Called when min/max/decimals/value is edited from the inspector panel."""
+        if hasattr(self, "spin_widget") and self.spin_widget and hasattr(self, "slider_widget") and self.slider_widget:
+            t = self.node.__class__.__name__
+            is_int = (t == "IntegerSliderNode")
+            min_val = float(self.node.widget_values.get("min", 0.0))
+            max_val = float(self.node.widget_values.get("max", 50.0 if not is_int else 100.0))
+            cur_val = float(self.node.widget_values.get("value", 5.0 if not is_int else 10))
+            decimals = int(self.node.widget_values.get("decimals", 2 if not is_int else 0))
+
+            self.spin_widget.blockSignals(True)
+            self.slider_widget.blockSignals(True)
+
+            self.spin_widget.setDecimals(decimals)
+            self.spin_widget.setRange(min_val, max_val)
+            self.spin_widget.setValue(cur_val)
+
+            steps = int(round(max_val - min_val)) if is_int else 1000
+            self.slider_widget.setMaximum(max(1, steps))
+            if is_int:
+                tick = int(round(cur_val - min_val))
+            else:
+                ratio = (cur_val - min_val) / (max_val - min_val) if max_val > min_val else 0.0
+                tick = int(round(ratio * 1000))
+            self.slider_widget.setValue(max(0, min(steps, tick)))
+
+            self.spin_widget.blockSignals(False)
+            self.slider_widget.blockSignals(False)
+
+    def update_expression_text(self, text: str) -> None:
+        """Called when expression is edited from the inspector panel."""
+        if hasattr(self, "expr_line_edit") and self.expr_line_edit:
+            if self.expr_line_edit.text() != text:
+                self.expr_line_edit.blockSignals(True)
+                self.expr_line_edit.setText(text)
+                self.expr_line_edit.blockSignals(False)
+
+    def update_panel_content(self, text: str) -> None:
+        """Called when panel content is edited from the inspector panel."""
+        if hasattr(self, "panel_pte") and self.panel_pte:
+            if self.panel_pte.toPlainText() != text:
+                self.panel_pte.blockSignals(True)
+                self.panel_pte.setPlainText(text)
+                self.panel_pte.blockSignals(False)
 
 
     def boundingRect(self) -> QRectF:

@@ -12,7 +12,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsProxyWidget,
-    QGraphicsPathItem, QApplication
+    QGraphicsPathItem, QApplication, QWidget
 )
 
 from ..engine import NodeGraph, NodeBase, Connection, Port, PortType
@@ -359,9 +359,24 @@ class NodeGraphView(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         # Don't intercept shortcut keys if an embedded widget has keyboard focus
         focus_item = self.scene().focusItem()
-        if isinstance(focus_item, QGraphicsProxyWidget):
+        if isinstance(focus_item, QGraphicsProxyWidget) or (focus_item and hasattr(focus_item, "isWidget") and focus_item.isWidget()):
             super().keyPressEvent(event)
             return
+
+        fw = QApplication.focusWidget()
+        if fw is not None and fw not in (self, self.viewport()):
+            super().keyPressEvent(event)
+            return
+
+        # Check if any embedded widget in selected items has focus
+        for it in self.node_scene.selectedItems():
+            if isinstance(it, NodeItem):
+                for child in it.childItems():
+                    if isinstance(child, QGraphicsProxyWidget):
+                        w = child.widget()
+                        if w and (w.hasFocus() or any(c.hasFocus() for c in w.findChildren(QWidget))):
+                            super().keyPressEvent(event)
+                            return
 
         # Ctrl+C: Copy selected nodes
         if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_C:
