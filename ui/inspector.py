@@ -252,8 +252,11 @@ class NodeInspectorPanel(QWidget):
         def on_name_changed(txt):
             if not self._syncing:
                 node.name = txt.strip() if txt.strip() else node.__class__.name
+                node.dirty = True
                 if self.current_node_item:
                     self.current_node_item.update()
+                if self.current_scene:
+                    self.current_scene.notify_graph_changed()
 
         le_name.textChanged.connect(on_name_changed)
         lay_name.addWidget(lbl_nick)
@@ -492,6 +495,11 @@ class NodeInspectorPanel(QWidget):
                 txt = te_expr.toPlainText().strip()
                 node.widget_values["expr"] = txt
                 node.dirty = True
+                if hasattr(node, "sync_dynamic_ports"):
+                    if node.sync_dynamic_ports():
+                        if self.current_node_item and hasattr(self.current_node_item, "rebuild_ports"):
+                            self.current_node_item.rebuild_ports()
+                        self.populate(self.current_node, self.current_node_item, self.current_scene)
                 if self.current_node_item and hasattr(self.current_node_item, "update_expression_text"):
                     self.current_node_item.update_expression_text(txt)
                 if self.current_scene:
@@ -603,8 +611,11 @@ class NodeInspectorPanel(QWidget):
                 def rename_port(new_txt):
                     if not self._syncing and new_txt.strip():
                         p.name = new_txt.strip()
+                        node.dirty = True
                         if self.current_node_item:
                             self.current_node_item.update()
+                        if self.current_scene:
+                            self.current_scene.notify_graph_changed()
                 return rename_port
 
             le_pname.textChanged.connect(make_renamer(port, le_pname))
@@ -690,8 +701,11 @@ class NodeInspectorPanel(QWidget):
                 def rename_out(new_txt):
                     if not self._syncing and new_txt.strip():
                         p.name = new_txt.strip()
+                        node.dirty = True
                         if self.current_node_item:
                             self.current_node_item.update()
+                        if self.current_scene:
+                            self.current_scene.notify_graph_changed()
                 return rename_out
 
             le_pname.textChanged.connect(make_out_renamer(port))

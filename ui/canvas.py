@@ -378,6 +378,17 @@ class NodeGraphView(QGraphicsView):
                             super().keyPressEvent(event)
                             return
 
+        # Check if an editable text widget currently has focus (e.g. QLineEdit, QPlainTextEdit)
+        focus_widget = QApplication.focusWidget()
+        if focus_widget and (hasattr(focus_widget, "text") or hasattr(focus_widget, "toPlainText")):
+            super().keyPressEvent(event)
+            return
+
+        # Check if scene focus item is an embedded proxy widget
+        if self.node_scene.focusItem() and isinstance(self.node_scene.focusItem(), QGraphicsProxyWidget):
+            super().keyPressEvent(event)
+            return
+
         # Ctrl+C: Copy selected nodes
         if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_C:
             self.copy_selected_nodes()
@@ -415,7 +426,6 @@ class NodeGraphView(QGraphicsView):
         selected_ids = set()
         for item in selected_node_items:
             data = item.node.serialize()
-            data["input_names"] = [p.name for p in item.node.inputs]
             copied_nodes.append(data)
             selected_ids.add(item.node.id)
 
@@ -453,20 +463,9 @@ class NodeGraphView(QGraphicsView):
                 continue
 
             new_node = cls()
+            new_node.deserialize(n_data)
             new_node.x = float(n_data.get("x", 0.0)) + offset
             new_node.y = float(n_data.get("y", 0.0)) + offset
-            new_node.widget_values = copy.deepcopy(n_data.get("widgets", {}))
-
-            if hasattr(new_node, "sync_dynamic_ports"):
-                saved_inputs = n_data.get("input_names", [])
-                for name in saved_inputs:
-                    if name != "Expr" and not any(p.name == name for p in new_node.inputs):
-                        new_node.add_input(name, PortType.ANY, 0.0, f"Input variable {name}")
-                expr_ports = [p for p in new_node.inputs if p.name == "Expr"]
-                if expr_ports:
-                    for ep in expr_ports:
-                        new_node.inputs.remove(ep)
-                    new_node.inputs.append(expr_ports[0])
 
             item = self.node_scene.add_node_to_scene(new_node)
             item.setSelected(True)
@@ -478,7 +477,13 @@ class NodeGraphView(QGraphicsView):
             tgt_node = id_map.get(c_data["target_node"])
             if src_node and tgt_node:
                 src_port = next((p for p in src_node.outputs if p.name == c_data["source_port"]), None)
+                if not src_port:
+                    src_port = next((p for p in src_node.outputs if getattr(p, "original_name", None) == c_data["source_port"]), None)
+
                 tgt_port = next((p for p in tgt_node.inputs if p.name == c_data["target_port"]), None)
+                if not tgt_port:
+                    tgt_port = next((p for p in tgt_node.inputs if getattr(p, "original_name", None) == c_data["target_port"]), None)
+
                 if src_port and tgt_port:
                     conn = self.node_scene.graph.connect(src_port, tgt_port, append=True)
                     if conn:

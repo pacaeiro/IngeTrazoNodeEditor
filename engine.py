@@ -6,6 +6,7 @@ import enum
 import time
 import json
 import uuid
+import copy
 import logging
 from typing import Dict, List, Optional, Any, Callable, Set
 
@@ -52,12 +53,25 @@ class Port:
     ):
         self.node = node
         self.name = name
+        self.original_name = name
         self.port_type = port_type
         self.is_input = is_input
         self._default_value = default_value
         self._value: Any = default_value
         self.description = description
         self.connections: List[Connection] = []
+
+    def serialize(self) -> dict:
+        def_val = None
+        if isinstance(self._default_value, (int, float, str, bool, list, dict)) or self._default_value is None:
+            def_val = self._default_value
+        return {
+            "name": self.name,
+            "original_name": getattr(self, "original_name", self.name),
+            "type": self.port_type.value,
+            "default_value": def_val,
+            "description": self.description,
+        }
 
     @property
     def default_value(self) -> Any:
@@ -157,6 +171,11 @@ class NodeBase:
                 if p.name == index_or_name:
                     port = p
                     break
+            if port is None:
+                for p in self.inputs:
+                    if getattr(p, "original_name", None) == index_or_name:
+                        port = p
+                        break
 
         if port is None:
             return fallback
@@ -191,7 +210,11 @@ class NodeBase:
             for p in self.outputs:
                 if p.name == index_or_name:
                     p.value = value
-                    break
+                    return
+            for p in self.outputs:
+                if getattr(p, "original_name", None) == index_or_name:
+                    p.value = value
+                    return
 
     def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
         """Core execution logic. Subclasses must implement."""
@@ -204,7 +227,9 @@ class NodeBase:
             "name": self.name,
             "x": self.x,
             "y": self.y,
-            "widgets": self.widget_values
+            "inputs": [p.serialize() for p in self.inputs],
+            "outputs": [p.serialize() for p in self.outputs],
+            "widgets": copy.deepcopy(self.widget_values)
         }
 
     def deserialize(self, data: dict) -> None:
@@ -213,6 +238,48 @@ class NodeBase:
         self.x = data.get("x", 0.0)
         self.y = data.get("y", 0.0)
         self.widget_values.update(data.get("widgets", {}))
+
+        if "inputs" in data:
+            new_inputs: List[Port] = []
+            for pdata in data["inputs"]:
+                ptype_str = pdata.get("type", "any")
+                try:
+                    ptype = PortType(ptype_str)
+                except Exception:
+                    ptype = PortType.ANY
+                p = Port(
+                    node=self,
+                    name=pdata.get("name", "in"),
+                    port_type=ptype,
+                    is_input=True,
+                    default_value=pdata.get("default_value"),
+                    description=pdata.get("description", "")
+                )
+                p.original_name = pdata.get("original_name", p.name)
+                new_inputs.append(p)
+            self.inputs = new_inputs
+        elif hasattr(self, "sync_dynamic_ports"):
+            self.sync_dynamic_ports()
+
+        if "outputs" in data:
+            new_outputs: List[Port] = []
+            for pdata in data["outputs"]:
+                ptype_str = pdata.get("type", "any")
+                try:
+                    ptype = PortType(ptype_str)
+                except Exception:
+                    ptype = PortType.ANY
+                p = Port(
+                    node=self,
+                    name=pdata.get("name", "out"),
+                    port_type=ptype,
+                    is_input=False,
+                    default_value=pdata.get("default_value"),
+                    description=pdata.get("description", "")
+                )
+                p.original_name = pdata.get("original_name", p.name)
+                new_outputs.append(p)
+            self.outputs = new_outputs
 
 
 class NodeGraph:
@@ -356,9 +423,21 @@ class NodeGraph:
             src_node = id_map.get(cd.get("source_node"))
             dst_node = id_map.get(cd.get("target_node"))
             if src_node and dst_node:
-                src_port = next((p for p in src_node.outputs if p.name == cd.get("source_port")), None)
-                dst_port = next((p for p in dst_node.inputs if p.name == cd.get("target_port")), None)
+                s_name = cd.get("source_port")
+                t_name = cd.get("target_port")
+                src_port = next((p for p in src_node.outputs if p.name == s_name), None)
+                if not src_port:
+                    src_port = next((p for p in src_node.outputs if getattr(p, "original_name", None) == s_name), None)
+
+                dst_port = next((p for p in dst_node.inputs if p.name == t_name), None)
+                if not dst_port:
+                    dst_port = next((p for p in dst_node.inputs if getattr(p, "original_name", None) == t_name), None)
+
                 if src_port and dst_port:
                     self.connect(src_port, dst_port)
+
+        for node in self.nodes:
+            if hasattr(node, "sync_dynamic_ports"):
+                node.sync_dynamic_ports()
 
         self.notify_changed()

@@ -358,6 +358,9 @@ class NodeItem(QGraphicsObject):
             def on_expr_changed(txt):
                 self.node.widget_values["expr"] = txt
                 self.node.dirty = True
+                if hasattr(self.node, "sync_dynamic_ports"):
+                    if self.node.sync_dynamic_ports():
+                        self.rebuild_ports()
                 if self.scene():
                     self.scene().notify_graph_changed()
 

@@ -610,18 +610,59 @@ class ExpressionNode(NodeBase):
         self.add_output("Result", PortType.ANY, "Evaluated result (number or list)")
         self.widget_values.setdefault("expr", "x + y")
 
+    def get_formula_variables(self) -> List[str]:
+        """Extract variable names required by the expression formula in left-to-right order."""
+        wire_expr = self.get_input("Expr", "")
+        if wire_expr and str(wire_expr).strip():
+            expr_str = str(wire_expr).strip()
+        else:
+            expr_str = str(self.widget_values.get("expr", "x + y")).strip()
+        if not expr_str:
+            return []
+        try:
+            clean = _prepare_expression(expr_str)
+            tree = ast.parse(clean, mode="eval")
+            name_nodes: List[ast.Name] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name):
+                    name_nodes.append(node)
+            name_nodes.sort(key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+            names: List[str] = []
+            for node in name_nodes:
+                nid = node.id
+                if (nid not in MATH_ENV and nid.lower() not in MATH_ENV
+                        and nid not in ("i", "I", "True", "False", "None")):
+                    if nid not in names:
+                        names.append(nid)
+            return names
+        except Exception:
+            return []
+
     def sync_dynamic_ports(self) -> bool:
         """
         Maintains the invariant:
         - At least 1 variable input exists (starts at 'x').
+        - All variables referenced in the formula are guaranteed to have input ports.
         - Exactly ONE unused (disconnected) variable input is reserved at the end.
         - When all variable inputs are connected, a new one is created from VARIABLE_NAMES.
         - When wires are sliced/disconnected, trailing unused inputs are removed,
-          always leaving exactly one disconnected input.
+          always leaving exactly one disconnected input, without ever removing variables needed by the formula.
         Returns True if ports were added or removed.
         """
         changed = False
+        formula_vars = self.get_formula_variables()
         var_ports = [p for p in self.inputs if p.name != "Expr"]
+
+        # Ensure all variables present in the formula have an input port
+        existing_names = {p.name for p in var_ports}
+        for vname in formula_vars:
+            if vname not in existing_names:
+                new_p = Port(self, vname, PortType.ANY, is_input=True, default_value=1.0 if vname in ("x", "a") else 0.0, description=f"Input variable {vname}")
+                expr_idx = next((i for i, port in enumerate(self.inputs) if port.name == "Expr"), len(self.inputs))
+                self.inputs.insert(expr_idx, new_p)
+                var_ports.append(new_p)
+                existing_names.add(vname)
+                changed = True
 
         # Ensure at least 1 variable port
         if not var_ports:
@@ -636,7 +677,7 @@ class ExpressionNode(NodeBase):
             existing_names = {p.name for p in var_ports}
             next_name = None
             for name in VARIABLE_NAMES:
-                if name not in existing_names:
+                if name not in existing_names and name not in formula_vars:
                     next_name = name
                     break
             if not next_name:
@@ -649,8 +690,12 @@ class ExpressionNode(NodeBase):
             changed = True
 
         # Rule 2: If multiple trailing ports are disconnected, pop trailing ports
-        # so we always leave exactly ONE disconnected input
-        while len(var_ports) > 1 and not var_ports[-1].has_connection and not var_ports[-2].has_connection:
+        # so we always leave exactly ONE disconnected input,
+        # but NEVER remove a port if its name is in the formula!
+        while (len(var_ports) > 1
+               and not var_ports[-1].has_connection
+               and not var_ports[-2].has_connection
+               and var_ports[-1].name not in formula_vars):
             to_remove = var_ports.pop()
             if to_remove in self.inputs:
                 self.inputs.remove(to_remove)
@@ -704,19 +749,33 @@ class ExpressionNode(NodeBase):
                     scope[name.lower()] = item_val
                     scope[name.upper()] = item_val
 
-                # Extra aliases for convenience: x -> u, y -> v, z -> w
-                if "x" in var_values:
+                # Extra aliases for convenience: x <-> u, y <-> v, z <-> w
+                if "x" in var_values and "u" not in var_values:
                     xv = scope.get("x", 0.0)
                     scope.setdefault("u", xv)
                     scope.setdefault("U", xv)
-                if "y" in var_values:
+                elif "u" in var_values and "x" not in var_values:
+                    uv = scope.get("u", 0.0)
+                    scope.setdefault("x", uv)
+                    scope.setdefault("X", uv)
+
+                if "y" in var_values and "v" not in var_values:
                     yv = scope.get("y", 0.0)
                     scope.setdefault("v", yv)
                     scope.setdefault("V", yv)
-                if "z" in var_values:
+                elif "v" in var_values and "y" not in var_values:
+                    vv = scope.get("v", 0.0)
+                    scope.setdefault("y", vv)
+                    scope.setdefault("Y", vv)
+
+                if "z" in var_values and "w" not in var_values:
                     zv = scope.get("z", 0.0)
                     scope.setdefault("w", zv)
                     scope.setdefault("W", zv)
+                elif "w" in var_values and "z" not in var_values:
+                    wv = scope.get("w", 0.0)
+                    scope.setdefault("z", wv)
+                    scope.setdefault("Z", wv)
 
                 scope["i"] = float(i)
                 try:
@@ -738,18 +797,32 @@ class ExpressionNode(NodeBase):
                 scope[name.lower()] = item_val
                 scope[name.upper()] = item_val
 
-            if "x" in var_values:
+            if "x" in var_values and "u" not in var_values:
                 xv = scope.get("x", 0.0)
                 scope.setdefault("u", xv)
                 scope.setdefault("U", xv)
-            if "y" in var_values:
+            elif "u" in var_values and "x" not in var_values:
+                uv = scope.get("u", 0.0)
+                scope.setdefault("x", uv)
+                scope.setdefault("X", uv)
+
+            if "y" in var_values and "v" not in var_values:
                 yv = scope.get("y", 0.0)
                 scope.setdefault("v", yv)
                 scope.setdefault("V", yv)
-            if "z" in var_values:
+            elif "v" in var_values and "y" not in var_values:
+                vv = scope.get("v", 0.0)
+                scope.setdefault("y", vv)
+                scope.setdefault("Y", vv)
+
+            if "z" in var_values and "w" not in var_values:
                 zv = scope.get("z", 0.0)
                 scope.setdefault("w", zv)
                 scope.setdefault("W", zv)
+            elif "w" in var_values and "z" not in var_values:
+                wv = scope.get("w", 0.0)
+                scope.setdefault("z", wv)
+                scope.setdefault("Z", wv)
 
             scope["i"] = 0.0
             try:
