@@ -284,6 +284,87 @@ class RangeSeriesNode(NodeBase):
 
 
 @register_node
+class DivideRangeNode(NodeBase):
+    name = "Divide Range"
+    category = "Math"
+    description = "Divide a domain [Start, End] into evenly spaced numbers using Count (Linear Space / Linspace)."
+    header_color = "#d08770"
+
+    def setup_ports(self) -> None:
+        self.add_input("Start", PortType.NUMBER, 0.0, "Start value of domain")
+        self.add_input("End", PortType.NUMBER, 1.0, "End value of domain")
+        self.add_input("Count", PortType.INTEGER, 10, "Number of steps / points in range")
+        self.add_output("List", PortType.ANY, "Evenly spaced list of numbers")
+        self.add_output("Step", PortType.NUMBER, "Step size between adjacent values")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        s_in = self.get_input("Start", 0.0)
+        e_in = self.get_input("End", 1.0)
+        c_in = self.get_input("Count", 10)
+
+        is_list = any(isinstance(v, (list, tuple)) for v in [s_in, e_in, c_in])
+        if not is_list:
+            try:
+                start = float(s_in)
+            except Exception:
+                start = 0.0
+            try:
+                end = float(e_in)
+            except Exception:
+                end = 1.0
+            try:
+                count = max(1, int(c_in))
+            except Exception:
+                count = 10
+
+            if count == 1:
+                self.set_output("List", [start])
+                self.set_output("Step", 0.0)
+            else:
+                step = (end - start) / (count - 1)
+                series = [(start + i * step) for i in range(count - 1)] + [end]
+                self.set_output("List", series)
+                self.set_output("Step", step)
+        else:
+            starts = s_in if isinstance(s_in, (list, tuple)) else [s_in]
+            ends = e_in if isinstance(e_in, (list, tuple)) else [e_in]
+            counts = c_in if isinstance(c_in, (list, tuple)) else [c_in]
+            n_items = max(len(starts), len(ends), len(counts))
+
+            all_series: List[List[float]] = []
+            all_steps: List[float] = []
+            for i in range(n_items):
+                try:
+                    st = float(starts[min(i, len(starts) - 1)])
+                except Exception:
+                    st = 0.0
+                try:
+                    en = float(ends[min(i, len(ends) - 1)])
+                except Exception:
+                    en = 1.0
+                try:
+                    cnt = max(1, int(counts[min(i, len(counts) - 1)]))
+                except Exception:
+                    cnt = 10
+
+                if cnt == 1:
+                    all_series.append([st])
+                    all_steps.append(0.0)
+                else:
+                    stp = (en - st) / (cnt - 1)
+                    s = [(st + j * stp) for j in range(cnt - 1)] + [en]
+                    all_series.append(s)
+                    all_steps.append(stp)
+
+            if len(all_series) == 1:
+                self.set_output("List", all_series[0])
+                self.set_output("Step", all_steps[0])
+            else:
+                self.set_output("List", all_series)
+                self.set_output("Step", all_steps)
+
+
+@register_node
 class ExpressionNode(NodeBase):
     name = "Expression"
     category = "Math"
@@ -401,7 +482,53 @@ class ExpressionNode(NodeBase):
 
 
 # =====================================================================================
-# 3. VECTOR & POINTS
+# 3. LIST UTILITIES
+# =====================================================================================
+
+@register_node
+class CrossReferenceNode(NodeBase):
+    name = "Cross Reference"
+    category = "List"
+    description = "Compute the Cartesian product of two lists (A × B) to cross-reference every item of A with every item of B."
+    header_color = "#5e81ac"
+
+    def setup_ports(self) -> None:
+        self.add_input("A", PortType.ANY, description="First list of items")
+        self.add_input("B", PortType.ANY, description="Second list of items")
+        self.add_output("A", PortType.ANY, description="Cross-referenced elements of list A")
+        self.add_output("B", PortType.ANY, description="Cross-referenced elements of list B")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        raw_a = self.get_input("A")
+        raw_b = self.get_input("B")
+
+        if raw_a is None or raw_b is None:
+            self.set_output("A", [])
+            self.set_output("B", [])
+            return
+
+        list_a = list(raw_a) if isinstance(raw_a, (list, tuple)) else [raw_a]
+        list_b = list(raw_b) if isinstance(raw_b, (list, tuple)) else [raw_b]
+
+        if not list_a or not list_b:
+            self.set_output("A", [])
+            self.set_output("B", [])
+            return
+
+        out_a: List[Any] = []
+        out_b: List[Any] = []
+
+        for a in list_a:
+            for b in list_b:
+                out_a.append(a)
+                out_b.append(b)
+
+        self.set_output("A", out_a)
+        self.set_output("B", out_b)
+
+
+# =====================================================================================
+# 4. VECTOR & POINTS
 # =====================================================================================
 
 @register_node

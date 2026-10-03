@@ -37,7 +37,8 @@ A visual parametric node editor extension for **[IngeTrazo](https://github.com/i
   - Dragging sliders on the canvas live-streams parametric geometry directly into IngeTrazo's 3D viewport.
 - **Parametric Node Catalog:**
   - **Inputs:** Number Slider (live float/int), Value Box, Toggle Switch, Vector XYZ, Text String.
-  - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator, **Expression Node** (safe AST evaluator supporting formulas like `sin(x)*cos(y)`, `sqrt(x*x + y*y)`, variable aliases `x/y/z`, `u/v/w`, `a/b/c`, list broadcasting, and on-node code widget).
+  - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator, **Divide Range** (linear interpolation / linspace domain division with start, end, count, and step size output), **Expression Node** (safe AST evaluator supporting formulas like `sin(x)*cos(y)`, `sqrt(x*x + y*y)`, variable aliases `x/y/z`, `u/v/w`, `a/b/c`, list broadcasting, and on-node code widget).
+  - **List Operations:** **Cross Reference** (Cartesian product of two lists $A \times B$ pairing every element of A with every element of B for grid and coordinate synthesis).
   - **Points & Vectors:** Construct Point (supports list inputs), Deconstruct Point, Vector Math, Distance, 2D Grid Array.
   - **2D Profiles:** Line, Rectangle, Circle/Polygon, Polyline.
   - **3D Solids:** Box (Cuboid), Cylinder, UV Sphere, Extrude Profile, Face from Points, **Mesh from Points** (generates quad and triangulated 3D mesh surfaces from structured point grids with U and V counts, periodic wrapping, and UV transposition).
