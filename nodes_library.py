@@ -1587,6 +1587,57 @@ def _clean_and_orient_rings(
     return c_outer, c_holes
 
 
+def _offset_ring(
+    pts: List[Tuple[float, float]],
+    dist: float,
+    miter_limit: float = 3.0
+) -> List[Tuple[float, float]]:
+    """Offset a 2D polygon ring by distance `dist`.
+    For a CCW ring: positive `dist` expands outward, negative shrinks inward.
+    For a CW ring (hole): positive `dist` expands into the hole (shrinks hole size).
+    Pure Python with zero external C-dependencies.
+    """
+    n = len(pts)
+    if n < 3 or abs(dist) < 1e-6:
+        return list(pts)
+
+    normals: List[Tuple[float, float]] = []
+    for i in range(n):
+        p1 = pts[i]
+        p2 = pts[(i + 1) % n]
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-7:
+            normals.append((0.0, 0.0))
+        else:
+            normals.append((dy / L, -dx / L))
+
+    res: List[Tuple[float, float]] = []
+    for i in range(n):
+        prev = (i - 1 + n) % n
+        n1 = normals[prev]
+        n2 = normals[i]
+        p = pts[i]
+
+        det = n1[0] * n2[1] - n1[1] * n2[0]
+        if abs(det) < 1e-5:
+            res.append((p[0] + dist * n2[0], p[1] + dist * n2[1]))
+            continue
+
+        u = dist * (n2[1] - n1[1]) / det
+        v = dist * (n1[0] - n2[0]) / det
+        miter_len = math.hypot(u, v)
+        max_len = abs(dist) * miter_limit
+        if miter_len > max_len and miter_len > 1e-6:
+            scale = max_len / miter_len
+            u *= scale
+            v *= scale
+        res.append((p[0] + u, p[1] + v))
+
+    return res
+
+
 @register_node
 class FaceFromPointsNode(NodeBase):
     name = "Face from Points"
@@ -1704,25 +1755,43 @@ class RoofFromSurfaceNode(NodeBase):
         c_outer, c_holes = _clean_and_orient_rings(outer_2d, holes_2d)
 
         # Apply overhang buffer if requested
-        if overhang > 1e-4 and Polygon is not None:
-            try:
-                poly_ext = Polygon(c_outer).buffer(overhang, join_style="mitre", mitre_limit=3.0)
-                if not poly_ext.is_empty and poly_ext.geom_type == "Polygon":
-                    c_outer = list(poly_ext.exterior.coords)[:-1]
+        if overhang > 1e-4:
+            buffered = False
+            if Polygon is not None:
+                try:
+                    poly_ext = Polygon(c_outer).buffer(overhang, join_style="mitre", mitre_limit=3.0)
+                    if not poly_ext.is_empty and poly_ext.geom_type == "Polygon":
+                        c_outer = list(poly_ext.exterior.coords)[:-1]
 
-                new_holes = []
-                for h_ring in c_holes:
-                    h_poly = Polygon(h_ring).buffer(-overhang, join_style="mitre", mitre_limit=3.0)
-                    if not h_poly.is_empty and h_poly.geom_type == "Polygon" and h_poly.area > 0.1:
-                        new_holes.append(list(h_poly.exterior.coords)[:-1])
-                    elif h_poly.is_empty or h_poly.area <= 0.1:
-                        pass
-                    else:
-                        new_holes.append(h_ring)
-                c_holes = new_holes
-                c_outer, c_holes = _clean_and_orient_rings(c_outer, c_holes)
-            except Exception:
-                pass
+                    new_holes = []
+                    for h_ring in c_holes:
+                        h_poly = Polygon(h_ring).buffer(-overhang, join_style="mitre", mitre_limit=3.0)
+                        if not h_poly.is_empty and h_poly.geom_type == "Polygon" and h_poly.area > 0.1:
+                            new_holes.append(list(h_poly.exterior.coords)[:-1])
+                        elif h_poly.is_empty or h_poly.area <= 0.1:
+                            pass
+                        else:
+                            new_holes.append(h_ring)
+                    c_holes = new_holes
+                    c_outer, c_holes = _clean_and_orient_rings(c_outer, c_holes)
+                    buffered = True
+                except Exception:
+                    buffered = False
+
+            if not buffered:
+                try:
+                    c_outer = _offset_ring(c_outer, overhang)
+                    new_holes = []
+                    for h_ring in c_holes:
+                        h_off = _offset_ring(h_ring, overhang)
+                        # Check remaining hole area
+                        a = sum(h_off[i][0] * h_off[(i + 1) % len(h_off)][1] - h_off[(i + 1) % len(h_off)][0] * h_off[i][1] for i in range(len(h_off))) * 0.5
+                        if abs(a) > 0.1:
+                            new_holes.append(h_off)
+                    c_holes = new_holes
+                    c_outer, c_holes = _clean_and_orient_rings(c_outer, c_holes)
+                except Exception:
+                    pass
 
         top_faces: List[FaceData] = []
         ridge_lines: List[PolylineData] = []

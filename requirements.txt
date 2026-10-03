@@ -1,29 +1,20 @@
-# IngeTrazo Node Editor — External Dependencies
+# IngeTrazo Node Editor — Dependencies
 #
 # IngeTrazo ships with its own internal Python interpreter.
-# This plugin vendors pure-Python libraries directly in the package folder
-# so they work without any pip install step.
+# This plugin is 100% self-contained and requires NO external package installation.
 #
-# Code help: https://github.com/botffy/polyskel
 # ─────────────────────────────────────────────────────────────
-# VENDORED (already included — no install required)
+# BUNDLED / VENDORED (already included in repository)
 # ─────────────────────────────────────────────────────────────
 #   py_straight_skeleton/   Straight-skeleton algorithm for hip roofs with holes
-#   euclid3.py              2-D / 3-D geometry primitives (required by polyskel)
+#   euclid3.py              2-D / 3-D geometry primitives (used by polyskel)
 #   polyskel.py             Alternative straight-skeleton implementation (fallback)
 #
 # ─────────────────────────────────────────────────────────────
-# OPTIONAL — install only if you want overhang buffering on roofs
+# ZERO MANDATORY DEPENDENCIES
 # ─────────────────────────────────────────────────────────────
+# Polygon offsetting (roof overhang) is implemented natively in pure Python.
+# If Shapely is optionally installed, it will be used as an alternative buffer engine,
+# but it is completely optional and NOT required.
 #
-# Shapely provides precise polygon offset / buffer used by the
-# Roof from Surface node when Overhang > 0.
-# Without it the node falls back to a simple no-buffer path.
-#
-# Install into IngeTrazo's Python environment:
-#   pip install shapely
-#
-# Or into the miniconda environment IngeTrazo uses:
-#   conda install -c conda-forge shapely
-#
-shapely>=2.0
+# shapely>=2.0  # Optional (fallback buffer engine)
