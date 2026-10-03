@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Node canvas view and scene with infinite grid and wire management."""
+"""Node canvas view and scene with infinite grid, wire management, wire cutting, and copy/paste."""
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional
+import copy
+from typing import Dict, List, Optional, Set, Any
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QBrush, QColor, QPainter, QPen, QTransform, QWheelEvent, QMouseEvent, QKeyEvent
+    QBrush, QColor, QPainter, QPen, QTransform, QWheelEvent, QMouseEvent, QKeyEvent,
+    QPainterPath, QPainterPathStroker
 )
 from PySide6.QtWidgets import (
-    QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsProxyWidget
+    QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsProxyWidget,
+    QGraphicsPathItem, QApplication
 )
 
-from ..engine import NodeGraph, NodeBase, Connection, Port
+from ..engine import NodeGraph, NodeBase, Connection, Port, PortType
 from .node_item import NodeItem, PortItem
 from .wire_item import WireItem, TempWireItem
 from .search_dialog import NodeSearchDialog
+from ..nodes_library import NODE_REGISTRY
 
 
 class NodeGraphScene(QGraphicsScene):
@@ -43,13 +47,24 @@ class NodeGraphScene(QGraphicsScene):
             item = self.node_items.pop(node.id)
             self.removeItem(item)
 
-        # Remove attached wires
+        # Remove attached wires and record other nodes affected
+        affected_nodes: Set[NodeBase] = set()
         for conn_id, wire in list(self.wire_items.items()):
             if wire.connection.source.node == node or wire.connection.target.node == node:
+                other = wire.connection.target.node if wire.connection.source.node == node else wire.connection.source.node
+                affected_nodes.add(other)
                 self.removeItem(wire)
                 del self.wire_items[conn_id]
 
         self.graph.remove_node(node)
+
+        # Check affected nodes for dynamic ports (e.g. ExpressionNode)
+        for other in affected_nodes:
+            if hasattr(other, "sync_dynamic_ports"):
+                if other.sync_dynamic_ports():
+                    node_item = self.node_items.get(other.id)
+                    if node_item:
+                        node_item.rebuild_ports()
 
     def start_wire_drag(self, port_item: PortItem) -> None:
         self.drag_source_port = port_item
@@ -61,7 +76,7 @@ class NodeGraphScene(QGraphicsScene):
         if self.active_temp_wire:
             self.active_temp_wire.update_end(scene_pos)
 
-    def finish_wire_drag(self, release_pos: QPointF) -> None:
+    def finish_wire_drag(self, release_pos: QPointF, is_shift: bool = False) -> None:
         if not self.active_temp_wire or not self.drag_source_port:
             return
 
@@ -85,13 +100,30 @@ class NodeGraphScene(QGraphicsScene):
             dst = p2 if p2.is_input else (p1 if p1.is_input else None)
 
             if src and dst:
-                conn = self.graph.connect(src, dst)
+                # If not holding shift, disconnect and visually remove existing wires to dst
+                if not is_shift:
+                    for wire in list(self.wire_items.values()):
+                        if wire.connection.target == dst:
+                            self.removeItem(wire)
+                            if wire.connection.id in self.wire_items:
+                                del self.wire_items[wire.connection.id]
+
+                conn = self.graph.connect(src, dst, append=is_shift)
                 if conn:
-                    src_item = self.find_port_item(src)
-                    dst_item = self.find_port_item(dst)
-                    wire = WireItem(conn, src_item, dst_item)
-                    self.addItem(wire)
-                    self.wire_items[conn.id] = wire
+                    if conn.id not in self.wire_items:
+                        src_item = self.find_port_item(src)
+                        dst_item = self.find_port_item(dst)
+                        if src_item and dst_item:
+                            wire = WireItem(conn, src_item, dst_item)
+                            self.addItem(wire)
+                            self.wire_items[conn.id] = wire
+
+                # If target node has dynamic ports (e.g. ExpressionNode), sync them
+                if hasattr(dst.node, "sync_dynamic_ports"):
+                    if dst.node.sync_dynamic_ports():
+                        node_item = self.node_items.get(dst.node.id)
+                        if node_item:
+                            node_item.rebuild_ports()
 
         self.drag_source_port = None
 
@@ -148,6 +180,16 @@ class NodeGraphView(QGraphicsView):
         self._panning = False
         self._pan_start = QPointF()
 
+        # Wire cutting (laser slice) state
+        self._cutting = False
+        self._cut_path = QPainterPath()
+        self._cut_points: List[QPointF] = []
+        self._cut_line_item: Optional[QGraphicsPathItem] = None
+
+        # Clipboard for Copy & Paste
+        self._clipboard: Optional[dict] = None
+        self._paste_offset = 35.0
+
         self.setBackgroundBrush(QBrush(QColor("#181a1f")))
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
@@ -170,6 +212,23 @@ class NodeGraphView(QGraphicsView):
             x += grid_size
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        # Ctrl + Left click initiates wire cutting (laser slice)
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ControlModifier):
+            self._cutting = True
+            sp = self.mapToScene(event.pos())
+            self._cut_path = QPainterPath()
+            self._cut_path.moveTo(sp)
+            self._cut_points = [sp]
+
+            self._cut_line_item = QGraphicsPathItem()
+            self._cut_line_item.setZValue(500)
+            cut_pen = QPen(QColor("#ff3344"), 2.5, Qt.DashLine, Qt.RoundCap)
+            self._cut_line_item.setPen(cut_pen)
+            self.node_scene.addItem(self._cut_line_item)
+            self.setCursor(Qt.CrossCursor)
+            event.accept()
+            return
+
         # Middle click or Alt+Left click initiates canvas panning
         if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier):
             self._panning = True
@@ -181,6 +240,15 @@ class NodeGraphView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if getattr(self, "_cutting", False):
+            sp = self.mapToScene(event.pos())
+            self._cut_points.append(sp)
+            self._cut_path.lineTo(sp)
+            if self._cut_line_item:
+                self._cut_line_item.setPath(self._cut_path)
+            event.accept()
+            return
+
         if self._panning:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -196,6 +264,21 @@ class NodeGraphView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if getattr(self, "_cutting", False) and event.button() == Qt.LeftButton:
+            self._cutting = False
+            self.setCursor(Qt.ArrowCursor)
+
+            if self._cut_line_item:
+                if self._cut_line_item in self.node_scene.items():
+                    self.node_scene.removeItem(self._cut_line_item)
+                self._cut_line_item = None
+
+            if len(self._cut_points) >= 2:
+                self.slice_wires(self._cut_path)
+
+            event.accept()
+            return
+
         if self._panning:
             self._panning = False
             self.setCursor(Qt.ArrowCursor)
@@ -204,9 +287,48 @@ class NodeGraphView(QGraphicsView):
 
         if self.node_scene.active_temp_wire:
             sp = self.mapToScene(event.pos())
-            self.node_scene.finish_wire_drag(sp)
+            is_shift = bool(
+                (event.modifiers() & Qt.ShiftModifier) or
+                (QApplication.keyboardModifiers() & Qt.ShiftModifier)
+            )
+            self.node_scene.finish_wire_drag(sp, is_shift=is_shift)
 
         super().mouseReleaseEvent(event)
+
+    def slice_wires(self, cut_path: QPainterPath) -> None:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(8.0)
+        cut_shape = stroker.createStroke(cut_path)
+
+        wires_to_cut = []
+        for wire in list(self.node_scene.wire_items.values()):
+            wire_stroker = QPainterPathStroker()
+            wire_stroker.setWidth(6.0)
+            wire_shape = wire_stroker.createStroke(wire.path())
+            if cut_shape.intersects(wire_shape):
+                wires_to_cut.append(wire)
+
+        if not wires_to_cut:
+            return
+
+        affected_nodes: Set[NodeBase] = set()
+        for wire in wires_to_cut:
+            conn = wire.connection
+            affected_nodes.add(conn.target.node)
+            self.node_scene.graph.disconnect(conn.source, conn.target)
+            if wire in self.node_scene.items():
+                self.node_scene.removeItem(wire)
+            if conn.id in self.node_scene.wire_items:
+                del self.node_scene.wire_items[conn.id]
+
+        for node in affected_nodes:
+            if hasattr(node, "sync_dynamic_ports"):
+                if node.sync_dynamic_ports():
+                    node_item = self.node_scene.node_items.get(node.id)
+                    if node_item:
+                        node_item.rebuild_ports()
+
+        self.node_scene.notify_graph_changed()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
@@ -235,7 +357,25 @@ class NodeGraphView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() == Qt.Key_Space or event.key() == Qt.Key_Tab:
+        # Don't intercept shortcut keys if an embedded widget has keyboard focus
+        focus_item = self.scene().focusItem()
+        if isinstance(focus_item, QGraphicsProxyWidget):
+            super().keyPressEvent(event)
+            return
+
+        # Ctrl+C: Copy selected nodes
+        if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_C:
+            self.copy_selected_nodes()
+            event.accept()
+            return
+
+        # Ctrl+V: Paste copied nodes
+        elif event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_V:
+            self.paste_copied_nodes()
+            event.accept()
+            return
+
+        elif event.key() == Qt.Key_Space or event.key() == Qt.Key_Tab:
             cursor_pos = self.mapFromGlobal(self.cursor().pos())
             self.open_search_dialog(cursor_pos)
             event.accept()
@@ -250,6 +390,99 @@ class NodeGraphView(QGraphicsView):
             return
 
         super().keyPressEvent(event)
+
+    def copy_selected_nodes(self) -> None:
+        selected_node_items = [it for it in self.node_scene.selectedItems() if isinstance(it, NodeItem)]
+        if not selected_node_items:
+            return
+
+        copied_nodes = []
+        selected_ids = set()
+        for item in selected_node_items:
+            data = item.node.serialize()
+            data["input_names"] = [p.name for p in item.node.inputs]
+            copied_nodes.append(data)
+            selected_ids.add(item.node.id)
+
+        # Copy internal connections strictly between selected nodes
+        copied_conns = []
+        for conn in self.node_scene.graph.connections:
+            if conn.source.node.id in selected_ids and conn.target.node.id in selected_ids:
+                copied_conns.append({
+                    "source_node": conn.source.node.id,
+                    "source_port": conn.source.name,
+                    "target_node": conn.target.node.id,
+                    "target_port": conn.target.name
+                })
+
+        self._clipboard = {
+            "nodes": copied_nodes,
+            "connections": copied_conns
+        }
+        self._paste_offset = 35.0
+
+    def paste_copied_nodes(self) -> None:
+        clipboard = getattr(self, "_clipboard", None)
+        if not clipboard or not clipboard.get("nodes"):
+            return
+
+        self.node_scene.clearSelection()
+
+        id_map: Dict[str, NodeBase] = {}
+        offset = getattr(self, "_paste_offset", 35.0)
+
+        for n_data in clipboard["nodes"]:
+            cls_name = n_data.get("type", "")
+            cls = NODE_REGISTRY.get(cls_name)
+            if not cls:
+                continue
+
+            new_node = cls()
+            new_node.x = float(n_data.get("x", 0.0)) + offset
+            new_node.y = float(n_data.get("y", 0.0)) + offset
+            new_node.widget_values = copy.deepcopy(n_data.get("widgets", {}))
+
+            if hasattr(new_node, "sync_dynamic_ports"):
+                saved_inputs = n_data.get("input_names", [])
+                for name in saved_inputs:
+                    if name != "Expr" and not any(p.name == name for p in new_node.inputs):
+                        new_node.add_input(name, PortType.ANY, 0.0, f"Input variable {name}")
+                expr_ports = [p for p in new_node.inputs if p.name == "Expr"]
+                if expr_ports:
+                    for ep in expr_ports:
+                        new_node.inputs.remove(ep)
+                    new_node.inputs.append(expr_ports[0])
+
+            item = self.node_scene.add_node_to_scene(new_node)
+            item.setSelected(True)
+            id_map[n_data["id"]] = new_node
+
+        # Re-wire internal connections between pasted nodes
+        for c_data in clipboard.get("connections", []):
+            src_node = id_map.get(c_data["source_node"])
+            tgt_node = id_map.get(c_data["target_node"])
+            if src_node and tgt_node:
+                src_port = next((p for p in src_node.outputs if p.name == c_data["source_port"]), None)
+                tgt_port = next((p for p in tgt_node.inputs if p.name == c_data["target_port"]), None)
+                if src_port and tgt_port:
+                    conn = self.node_scene.graph.connect(src_port, tgt_port, append=True)
+                    if conn:
+                        src_item = self.node_scene.find_port_item(src_port)
+                        dst_item = self.node_scene.find_port_item(tgt_port)
+                        if src_item and dst_item:
+                            wire = WireItem(conn, src_item, dst_item)
+                            self.node_scene.addItem(wire)
+                            self.node_scene.wire_items[conn.id] = wire
+
+        for node in id_map.values():
+            if hasattr(node, "sync_dynamic_ports"):
+                if node.sync_dynamic_ports():
+                    node_item = self.node_scene.node_items.get(node.id)
+                    if node_item:
+                        node_item.rebuild_ports()
+
+        self._paste_offset = offset + 35.0
+        self.node_scene.notify_graph_changed()
 
     def open_search_dialog(self, view_pos) -> None:
         dlg = NodeSearchDialog(self)

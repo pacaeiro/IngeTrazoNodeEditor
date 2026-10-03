@@ -7,7 +7,7 @@ import math
 import copy
 from typing import List, Dict, Any, Optional, Union
 
-from .engine import NodeBase, PortType
+from .engine import NodeBase, PortType, Port
 from .models import (
     Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
     create_box, create_cylinder, create_sphere, extrude_profile
@@ -591,20 +591,72 @@ class DivideRangeNode(NodeBase):
                 self.set_output("Step", all_steps)
 
 
+VARIABLE_NAMES = [
+    "x", "y", "z", "w", "a", "b", "c", "d", "e", "f",
+    "g", "h", "k", "m", "n", "p", "q", "r", "s", "t", "u", "v"
+]
+
+
 @register_node
 class ExpressionNode(NodeBase):
     name = "Expression"
     category = "Math"
-    description = "Evaluate mathematical expressions (e.g. sin(x)*cos(y), x^2 + y^2, sqrt(x*x + y*y)). Supports lists, broadcasting, and trigonometry."
+    description = "Evaluate mathematical expressions (e.g. sin(x)*cos(y), x^2 + y^2, sqrt(x*x + y*y)). Supports dynamic variable inputs, lists, broadcasting, and trigonometry."
     header_color = "#b48ead"
 
     def setup_ports(self) -> None:
-        self.add_input("x", PortType.ANY, 1.0, "Input variable x (or u, a)")
-        self.add_input("y", PortType.ANY, 1.0, "Input variable y (or v, b)")
-        self.add_input("z", PortType.ANY, 0.0, "Input variable z (or w, c)")
+        self.add_input("x", PortType.ANY, 1.0, "Input variable x")
         self.add_input("Expr", PortType.STRING, "", "Formula override wire")
         self.add_output("Result", PortType.ANY, "Evaluated result (number or list)")
         self.widget_values.setdefault("expr", "x + y")
+
+    def sync_dynamic_ports(self) -> bool:
+        """
+        Maintains the invariant:
+        - At least 1 variable input exists (starts at 'x').
+        - Exactly ONE unused (disconnected) variable input is reserved at the end.
+        - When all variable inputs are connected, a new one is created from VARIABLE_NAMES.
+        - When wires are sliced/disconnected, trailing unused inputs are removed,
+          always leaving exactly one disconnected input.
+        Returns True if ports were added or removed.
+        """
+        changed = False
+        var_ports = [p for p in self.inputs if p.name != "Expr"]
+
+        # Ensure at least 1 variable port
+        if not var_ports:
+            p = Port(self, "x", PortType.ANY, is_input=True, default_value=1.0, description="Input variable x")
+            expr_idx = next((i for i, port in enumerate(self.inputs) if port.name == "Expr"), len(self.inputs))
+            self.inputs.insert(expr_idx, p)
+            var_ports = [p]
+            changed = True
+
+        # Rule 1: If the last variable port has a connection, add the next unused variable port
+        if var_ports[-1].has_connection:
+            existing_names = {p.name for p in var_ports}
+            next_name = None
+            for name in VARIABLE_NAMES:
+                if name not in existing_names:
+                    next_name = name
+                    break
+            if not next_name:
+                next_name = f"v{len(var_ports)}"
+
+            new_p = Port(self, next_name, PortType.ANY, is_input=True, default_value=0.0, description=f"Input variable {next_name}")
+            expr_idx = next((i for i, port in enumerate(self.inputs) if port.name == "Expr"), len(self.inputs))
+            self.inputs.insert(expr_idx, new_p)
+            var_ports.append(new_p)
+            changed = True
+
+        # Rule 2: If multiple trailing ports are disconnected, pop trailing ports
+        # so we always leave exactly ONE disconnected input
+        while len(var_ports) > 1 and not var_ports[-1].has_connection and not var_ports[-2].has_connection:
+            to_remove = var_ports.pop()
+            if to_remove in self.inputs:
+                self.inputs.remove(to_remove)
+            changed = True
+
+        return changed
 
     def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
         self.error = None
@@ -626,48 +678,47 @@ class ExpressionNode(NodeBase):
             self.set_output("Result", 0.0)
             return
 
-        x_raw = self.get_input("x", 1.0)
-        y_raw = self.get_input("y", 1.0)
-        z_raw = self.get_input("z", 0.0)
+        # Dynamically read all variable ports
+        var_ports = [p for p in self.inputs if p.name != "Expr"]
+        var_values: Dict[str, Any] = {}
+        for p in var_ports:
+            var_values[p.name] = self.get_input(p.name, p.default_value or 0.0)
 
         # Check if any input is a list/tuple
-        is_x_list = isinstance(x_raw, (list, tuple))
-        is_y_list = isinstance(y_raw, (list, tuple))
-        is_z_list = isinstance(z_raw, (list, tuple))
-
-        has_list = is_x_list or is_y_list or is_z_list
+        has_list = any(isinstance(v, (list, tuple)) for v in var_values.values())
 
         if has_list:
-            len_x = len(x_raw) if is_x_list else 1
-            len_y = len(y_raw) if is_y_list else 1
-            len_z = len(z_raw) if is_z_list else 1
-            n_items = max(len_x, len_y, len_z)
-
+            n_items = max(len(v) if isinstance(v, (list, tuple)) else 1 for v in var_values.values())
             results: List[float] = []
             for i in range(n_items):
-                try:
-                    val_x = float(x_raw[i % len_x]) if is_x_list else float(x_raw)
-                except Exception:
-                    val_x = 0.0
-                try:
-                    val_y = float(y_raw[i % len_y]) if is_y_list else float(y_raw)
-                except Exception:
-                    val_y = 0.0
-                try:
-                    val_z = float(z_raw[i % len_z]) if is_z_list else float(z_raw)
-                except Exception:
-                    val_z = 0.0
-
                 scope = dict(MATH_ENV)
-                scope.update({
-                    "x": val_x, "y": val_y, "z": val_z,
-                    "X": val_x, "Y": val_y, "Z": val_z,
-                    "u": val_x, "v": val_y, "w": val_z,
-                    "U": val_x, "V": val_y, "W": val_z,
-                    "a": val_x, "b": val_y, "c": val_z,
-                    "A": val_x, "B": val_y, "C": val_z,
-                    "i": float(i),
-                })
+                for name, val in var_values.items():
+                    if isinstance(val, (list, tuple)):
+                        item_val = float(val[i % len(val)]) if len(val) > 0 else 0.0
+                    else:
+                        try:
+                            item_val = float(val)
+                        except Exception:
+                            item_val = 0.0
+                    scope[name] = item_val
+                    scope[name.lower()] = item_val
+                    scope[name.upper()] = item_val
+
+                # Extra aliases for convenience: x -> u, y -> v, z -> w
+                if "x" in var_values:
+                    xv = scope.get("x", 0.0)
+                    scope.setdefault("u", xv)
+                    scope.setdefault("U", xv)
+                if "y" in var_values:
+                    yv = scope.get("y", 0.0)
+                    scope.setdefault("v", yv)
+                    scope.setdefault("V", yv)
+                if "z" in var_values:
+                    zv = scope.get("z", 0.0)
+                    scope.setdefault("w", zv)
+                    scope.setdefault("W", zv)
+
+                scope["i"] = float(i)
                 try:
                     res = eval(code, {"__builtins__": {}}, scope)
                     results.append(float(res))
@@ -677,29 +728,30 @@ class ExpressionNode(NodeBase):
 
             self.set_output("Result", results)
         else:
-            try:
-                val_x = float(x_raw)
-            except Exception:
-                val_x = 0.0
-            try:
-                val_y = float(y_raw)
-            except Exception:
-                val_y = 0.0
-            try:
-                val_z = float(z_raw)
-            except Exception:
-                val_z = 0.0
-
             scope = dict(MATH_ENV)
-            scope.update({
-                "x": val_x, "y": val_y, "z": val_z,
-                "X": val_x, "Y": val_y, "Z": val_z,
-                "u": val_x, "v": val_y, "w": val_z,
-                "U": val_x, "V": val_y, "W": val_z,
-                "a": val_x, "b": val_y, "c": val_z,
-                "A": val_x, "B": val_y, "C": val_z,
-                "i": 0.0,
-            })
+            for name, val in var_values.items():
+                try:
+                    item_val = float(val)
+                except Exception:
+                    item_val = 0.0
+                scope[name] = item_val
+                scope[name.lower()] = item_val
+                scope[name.upper()] = item_val
+
+            if "x" in var_values:
+                xv = scope.get("x", 0.0)
+                scope.setdefault("u", xv)
+                scope.setdefault("U", xv)
+            if "y" in var_values:
+                yv = scope.get("y", 0.0)
+                scope.setdefault("v", yv)
+                scope.setdefault("V", yv)
+            if "z" in var_values:
+                zv = scope.get("z", 0.0)
+                scope.setdefault("w", zv)
+                scope.setdefault("W", zv)
+
+            scope["i"] = 0.0
             try:
                 res = eval(code, {"__builtins__": {}}, scope)
                 self.set_output("Result", float(res))

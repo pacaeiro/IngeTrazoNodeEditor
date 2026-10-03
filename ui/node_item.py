@@ -83,6 +83,7 @@ class NodeItem(QGraphicsObject):
 
         self.input_ports: List[PortItem] = []
         self.output_ports: List[PortItem] = []
+        self.widget_proxy: Optional[QGraphicsProxyWidget] = None
         self.width = self.MIN_WIDTH
         self.height = 80.0
 
@@ -430,6 +431,7 @@ class NodeItem(QGraphicsObject):
             pte.textChanged.connect(on_panel_text)
             layout.addWidget(pte)
 
+        self.widget_proxy = proxy
         proxy.setWidget(container)
         if t == "PanelNode":
             widget_y = self.HEADER_HEIGHT + self.ROW_HEIGHT + 6.0
@@ -440,6 +442,84 @@ class NodeItem(QGraphicsObject):
             widget_y = self.height - 38.0
             proxy.setPos(0, widget_y)
             proxy.resize(self.width, 32.0)
+
+    def rebuild_ports(self) -> None:
+        """Dynamically rebuild port items when dynamic ports change (e.g. ExpressionNode)."""
+        # Unparent and remove old port items
+        for pi in self.input_ports:
+            pi.setParentItem(None)
+            if self.scene():
+                self.scene().removeItem(pi)
+        for pi in self.output_ports:
+            pi.setParentItem(None)
+            if self.scene():
+                self.scene().removeItem(pi)
+        self.input_ports.clear()
+        self.output_ports.clear()
+
+        # Recalculate dimensions
+        port_rows = max(len(self.node.inputs), len(self.node.outputs))
+        content_height = max(30.0, port_rows * self.ROW_HEIGHT)
+        has_widget = self.has_custom_widget()
+        if has_widget:
+            t_name = self.node.__class__.__name__
+            if t_name == "PanelNode":
+                content_height += 124.0
+                self.width = max(self.width, 220.0)
+            else:
+                content_height += 44.0
+                self.width = max(self.width, 220.0 if t_name == "ExpressionNode" else 210.0)
+
+        self.prepareGeometryChange()
+        self.height = self.HEADER_HEIGHT + content_height + 10.0
+
+        # Re-create input port items (left side)
+        y_cursor = self.HEADER_HEIGHT + 14.0
+        for port in self.node.inputs:
+            pi = PortItem(port, self)
+            pi.setPos(0, y_cursor)
+            self.input_ports.append(pi)
+            y_cursor += self.ROW_HEIGHT
+
+        # Re-create output port items (right side)
+        y_cursor = self.HEADER_HEIGHT + 14.0
+        for port in self.node.outputs:
+            pi = PortItem(port, self)
+            pi.setPos(self.width, y_cursor)
+            self.output_ports.append(pi)
+            y_cursor += self.ROW_HEIGHT
+
+        # Reposition embedded widget if present
+        proxy = self.widget_proxy
+        if proxy is None:
+            for child in self.childItems():
+                if isinstance(child, QGraphicsProxyWidget):
+                    proxy = child
+                    break
+
+        if proxy is not None:
+            t_name = self.node.__class__.__name__
+            if t_name == "PanelNode":
+                widget_y = self.HEADER_HEIGHT + self.ROW_HEIGHT + 6.0
+                widget_h = self.height - widget_y - 8.0
+                proxy.setPos(0, widget_y)
+                proxy.resize(self.width, max(40.0, widget_h))
+            else:
+                widget_y = self.height - 38.0
+                proxy.setPos(0, widget_y)
+                proxy.resize(self.width, 32.0)
+
+        # Update paths of connected wires
+        if self.scene() and hasattr(self.scene(), "wire_items"):
+            for wire in self.scene().wire_items.values():
+                if wire.connection.source.node == self.node:
+                    wire.source_item = self.scene().find_port_item(wire.connection.source)
+                    wire.update_path()
+                elif wire.connection.target.node == self.node:
+                    wire.target_item = self.scene().find_port_item(wire.connection.target)
+                    wire.update_path()
+
+        self.update()
 
 
     def boundingRect(self) -> QRectF:

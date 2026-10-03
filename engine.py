@@ -161,8 +161,18 @@ class NodeBase:
             return fallback
 
         if port.has_connection:
-            src = port.connections[0].source
-            return src.value if src.value is not None else fallback
+            if len(port.connections) == 1:
+                src = port.connections[0].source
+                return src.value if src.value is not None else fallback
+            else:
+                merged = []
+                for c in port.connections:
+                    val = c.source.value
+                    if isinstance(val, (list, tuple)):
+                        merged.extend(val)
+                    elif val is not None:
+                        merged.append(val)
+                return merged if merged else fallback
 
         # If disconnected, check widget value matching port name
         if port.name in self.widget_values:
@@ -225,15 +235,21 @@ class NodeGraph:
             self.nodes.remove(node)
             self.notify_changed()
 
-    def connect(self, source_port: Port, target_port: Port) -> Optional[Connection]:
+    def connect(self, source_port: Port, target_port: Port, append: bool = False) -> Optional[Connection]:
         if source_port.is_input or not target_port.is_input:
             return None
         if source_port.node == target_port.node:
             return None  # No self-loops
 
-        # Single connection per input port
-        for existing in list(target_port.connections):
-            self.disconnect(existing.source, existing.target)
+        # Prevent duplicate connection from the exact same source port
+        for existing in target_port.connections:
+            if existing.source == source_port:
+                return existing
+
+        if not append:
+            # Single connection per input port if not appending
+            for existing in list(target_port.connections):
+                self.disconnect(existing.source, existing.target)
 
         conn = Connection(source_port, target_port)
         source_port.connections.append(conn)

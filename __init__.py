@@ -17,7 +17,11 @@ import logging
 from typing import Optional, Any
 from pathlib import Path
 
-from tools.base import Tool
+try:
+    from tools.base import Tool
+except ImportError:
+    class Tool:
+        pass
 
 log = logging.getLogger("ingetrazo.plugins.node_editor")
 
