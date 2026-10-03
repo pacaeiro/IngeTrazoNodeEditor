@@ -279,7 +279,7 @@ class NodeInspectorPanel(QWidget):
 
     def _build_parameters_section(self, node: NodeBase) -> None:
         t_name = node.__class__.__name__
-        has_params = (t_name in ("NumberSliderNode", "IntegerSliderNode", "ExpressionNode", "ToggleNode", "StringNode", "PanelNode"))
+        has_params = (t_name in ("NumberSliderNode", "IntegerSliderNode", "ExpressionNode", "ToggleNode", "StringNode", "PanelNode", "ReferenceFaceNode"))
 
         if not has_params:
             return
@@ -557,6 +557,74 @@ class NodeInspectorPanel(QWidget):
 
             pte_panel.textChanged.connect(on_pte)
             lay.addWidget(pte_panel)
+
+        elif t_name == "ReferenceFaceNode":
+            p_box = QWidget()
+            p_lay = QVBoxLayout(p_box)
+            p_lay.setContentsMargins(8, 6, 8, 6)
+            p_lay.setSpacing(8)
+            p_box.setStyleSheet("background: #252830; border-radius: 6px;")
+
+            saved_ref = node.widget_values.get("referenced_face")
+            status_txt = f"Referenced: {saved_ref.get('summary', '')}" if saved_ref else "No face stored (Click 'Set Selected Face')"
+            lbl_info = QLabel(status_txt)
+            lbl_info.setWordWrap(True)
+            lbl_info.setStyleSheet("color: #a3be8c; font-size: 11px; font-weight: bold;" if saved_ref else "color: #d8dee9; font-size: 11px; font-style: italic;")
+
+            btn_set = QPushButton("📌 Set Selected Face")
+            btn_set.setCursor(Qt.PointingHandCursor)
+            btn_set.setStyleSheet("""
+                QPushButton {
+                    background: #434c5e; color: #eceff4; border: 1px solid #4c566a;
+                    border-radius: 4px; padding: 6px 10px; font-weight: bold;
+                }
+                QPushButton:hover { background: #4c566a; color: #88c0d0; border-color: #88c0d0; }
+            """)
+
+            btn_clear = QPushButton("✕ Clear Stored Face")
+            btn_clear.setCursor(Qt.PointingHandCursor)
+            btn_clear.setStyleSheet("""
+                QPushButton {
+                    background: #2e3440; color: #bf616a; border: 1px solid #bf616a;
+                    border-radius: 4px; padding: 4px 8px;
+                }
+                QPushButton:hover { background: #bf616a; color: #eceff4; }
+            """)
+
+            def on_inspector_set():
+                app = getattr(self.current_scene, "app", None)
+                if not app:
+                    from PySide6.QtWidgets import QApplication
+                    app = getattr(QApplication.instance(), "_extension_app_handle", None)
+                msg, ok = node.reference_from_selection(app)
+                lbl_info.setText(msg)
+                if ok:
+                    lbl_info.setStyleSheet("color: #a3be8c; font-size: 11px; font-weight: bold;")
+                else:
+                    lbl_info.setStyleSheet("color: #ebcb8b; font-size: 11px;")
+                node.dirty = True
+                if self.current_scene:
+                    self.current_scene.notify_graph_changed()
+                if self.current_node_item and hasattr(self.current_node_item, "update"):
+                    self.current_node_item.update()
+
+            def on_inspector_clear():
+                node.clear_reference()
+                lbl_info.setText("Face cleared (using live selection or demo)")
+                lbl_info.setStyleSheet("color: #d8dee9; font-size: 11px; font-style: italic;")
+                node.dirty = True
+                if self.current_scene:
+                    self.current_scene.notify_graph_changed()
+                if self.current_node_item and hasattr(self.current_node_item, "update"):
+                    self.current_node_item.update()
+
+            btn_set.clicked.connect(on_inspector_set)
+            btn_clear.clicked.connect(on_inspector_clear)
+
+            p_lay.addWidget(lbl_info)
+            p_lay.addWidget(btn_set)
+            p_lay.addWidget(btn_clear)
+            lay.addWidget(p_box)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)

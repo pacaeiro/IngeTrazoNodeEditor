@@ -30,7 +30,9 @@ class NodeEditorWidget(QWidget):
 
         self.graph = NodeGraph()
         self.scene = NodeGraphScene(self.graph)
+        self.scene.app = self.app
         self.view = NodeGraphView(self.scene, self)
+        self.view.app = self.app
         self.inspector = NodeInspectorPanel(self)
         self.inspector.hide()
 
@@ -124,6 +126,7 @@ class NodeEditorWidget(QWidget):
         self.combo_presets.addItem("3. Spiral Staircase")
         self.combo_presets.addItem("4. Column Grid Array")
         self.combo_presets.addItem("5. Parametric Wave Surface")
+        self.combo_presets.addItem("6. Roof from Face")
         self.combo_presets.currentIndexChanged.connect(self.on_preset_selected)
         toolbar.addWidget(self.combo_presets)
 
@@ -335,6 +338,8 @@ class NodeEditorWidget(QWidget):
             self.build_example_column_grid()
         elif index == 5:
             self.build_example_wave_surface()
+        elif index == 6:
+            self.build_example_roof_from_face()
 
     def build_example_box(self) -> None:
         self.clear_graph()
@@ -369,35 +374,48 @@ class NodeEditorWidget(QWidget):
     def build_example_house(self) -> None:
         self.clear_graph()
         from ..nodes_library import (
-            NumberSliderNode, RectangleNode, ExtrudeNode, IngeTrazoOutputNode
+            NumberSliderNode, RectangleNode, ExtrudeNode,
+            RoofFromSurfaceNode, MergeMeshesNode, IngeTrazoOutputNode
         )
 
         w = self.graph.add_node(NumberSliderNode())
-        w.x, w.y = -420, -50
-        w.widget_values["value"] = 6.0
+        w.x, w.y = -520, -100
+        w.widget_values["value"] = 8.0
 
         l = self.graph.add_node(NumberSliderNode())
-        l.x, l.y = -420, 110
-        l.widget_values["value"] = 8.0
+        l.x, l.y = -520, 60
+        l.widget_values["value"] = 12.0
 
         h = self.graph.add_node(NumberSliderNode())
-        h.x, h.y = -420, 270
-        h.widget_values["value"] = 3.5
+        h.x, h.y = -520, 220
+        h.widget_values["value"] = 3.2
 
         rect = self.graph.add_node(RectangleNode())
-        rect.x, rect.y = -150, 20
+        rect.x, rect.y = -260, 40
 
         ext = self.graph.add_node(ExtrudeNode())
-        ext.x, ext.y = 120, 50
+        ext.x, ext.y = 0, -40
+
+        roof = self.graph.add_node(RoofFromSurfaceNode())
+        roof.x, roof.y = 0, 180
+        roof.inputs[4].default_value = 0.4   # Overhang
+        roof.inputs[5].default_value = 0.25  # Thickness
+
+        merge = self.graph.add_node(MergeMeshesNode())
+        merge.x, merge.y = 260, 60
 
         out = self.graph.add_node(IngeTrazoOutputNode())
-        out.x, out.y = 380, 50
+        out.x, out.y = 500, 60
 
-        self.graph.connect(w.outputs[0], rect.inputs[1])  # Width
-        self.graph.connect(l.outputs[0], rect.inputs[2])  # Length
-        self.graph.connect(rect.outputs[0], ext.inputs[0])  # Profile
-        self.graph.connect(h.outputs[0], ext.inputs[1])  # Height
-        self.graph.connect(ext.outputs[0], out.inputs[0])  # Output
+        self.graph.connect(w.outputs[0], rect.inputs[1])     # Width -> Rectangle
+        self.graph.connect(l.outputs[0], rect.inputs[2])     # Length -> Rectangle
+        self.graph.connect(rect.outputs[0], ext.inputs[0])   # Rectangle -> Wall Extrude
+        self.graph.connect(h.outputs[0], ext.inputs[1])      # Height -> Wall Extrude
+        self.graph.connect(rect.outputs[0], roof.inputs[0])  # Rectangle -> Roof Surface
+        self.graph.connect(h.outputs[0], roof.inputs[6])     # Height -> Roof Elevation
+        self.graph.connect(ext.outputs[0], merge.inputs[0])  # Walls -> Merge A
+        self.graph.connect(roof.outputs[0], merge.inputs[1]) # Roof -> Merge B
+        self.graph.connect(merge.outputs[0], out.inputs[0])  # Merged -> Output
 
         self.scene.sync_from_graph()
         self.run_evaluation()
@@ -493,6 +511,76 @@ class NodeEditorWidget(QWidget):
         self.graph.connect(con.outputs[0], mesh_pts.inputs[0])
         # 5. Mesh from Points -> IngeTrazo Output
         self.graph.connect(mesh_pts.outputs[0], out.inputs[0])
+
+        self.scene.sync_from_graph()
+        self.run_evaluation()
+
+    def build_example_roof_from_face(self) -> None:
+        """Preset: reads active selection as a surface (with holes) → roof generator.
+
+        Wire layout:
+            ReferenceFaceNode ──surface──► RoofFromSurfaceNode ──mesh──► IngeTrazoOutputNode
+            NumberSliderNode  ──angle────►  (input 2)
+            IntegerSliderNode ──style────►  (input 3)
+            NumberSliderNode  ──overhang─►  (input 4)
+            NumberSliderNode  ──thickness►  (input 5)
+        """
+        self.clear_graph()
+        from ..nodes_library import (
+            NumberSliderNode, IntegerSliderNode,
+            ReferenceFaceNode, RoofFromSurfaceNode, IngeTrazoOutputNode,
+        )
+
+        # Reference Face (reads active selection or falls back to demo courtyard house)
+        ref = self.graph.add_node(ReferenceFaceNode())
+        ref.x, ref.y = -320, 60
+
+        # Angle slider  (degrees, e.g. 30 deg)
+        s_angle = self.graph.add_node(NumberSliderNode())
+        s_angle.x, s_angle.y = -320, -160
+        s_angle.widget_values["value"] = 30.0
+        s_angle.widget_values["min"] = 5.0
+        s_angle.widget_values["max"] = 75.0
+        s_angle.inputs[0].default_value = 5.0
+        s_angle.inputs[1].default_value = 75.0
+
+        # Style slider  (0=Hip  1=Gable  2=Shed  3=Flat  4=Mansard)
+        s_style = self.graph.add_node(IntegerSliderNode())
+        s_style.x, s_style.y = -320, -40
+        s_style.widget_values["value"] = 0
+        s_style.widget_values["min"] = 0
+        s_style.widget_values["max"] = 4
+
+        # Overhang slider
+        s_over = self.graph.add_node(NumberSliderNode())
+        s_over.x, s_over.y = -320, 220
+        s_over.widget_values["value"] = 0.4
+        s_over.widget_values["min"] = 0.0
+        s_over.widget_values["max"] = 1.5
+
+        # Thickness slider
+        s_thick = self.graph.add_node(NumberSliderNode())
+        s_thick.x, s_thick.y = -320, 340
+        s_thick.widget_values["value"] = 0.2
+        s_thick.widget_values["min"] = 0.0
+        s_thick.widget_values["max"] = 0.6
+
+        # Roof node
+        roof = self.graph.add_node(RoofFromSurfaceNode())
+        roof.x, roof.y = 60, 60
+
+        # Output
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 380, 60
+        out.inputs[1].default_value = "RoofFromFace"
+
+        # Connections
+        self.graph.connect(ref.outputs[0], roof.inputs[0])   # Surface
+        self.graph.connect(s_angle.outputs[0], roof.inputs[2])  # Angle
+        self.graph.connect(s_style.outputs[0], roof.inputs[3])  # Style
+        self.graph.connect(s_over.outputs[0], roof.inputs[4])   # Overhang
+        self.graph.connect(s_thick.outputs[0], roof.inputs[5])  # Thickness
+        self.graph.connect(roof.outputs[0], out.inputs[0])      # Mesh -> Output
 
         self.scene.sync_from_graph()
         self.run_evaluation()

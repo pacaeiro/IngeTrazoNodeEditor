@@ -13,6 +13,21 @@ from .models import (
     create_box, create_cylinder, create_sphere, extrude_profile
 )
 
+try:
+    from .py_straight_skeleton import compute_skeleton
+except Exception:
+    try:
+        from py_straight_skeleton import compute_skeleton
+    except Exception:
+        compute_skeleton = None
+
+try:
+    from shapely.geometry import Polygon, MultiPolygon
+except ImportError:
+    Polygon = None
+    MultiPolygon = None
+
+
 # Registry of all available nodes: {Class.__name__: Class}
 NODE_REGISTRY: Dict[str, type] = {}
 
@@ -1314,11 +1329,11 @@ class SphereNode(NodeBase):
 class ExtrudeNode(NodeBase):
     name = "Extrude Profile"
     category = "Solids"
-    description = "Extrude a planar polygon curve or points along a height/vector into a 3D solid."
+    description = "Extrude a planar polygon curve, face, or points along a height/vector into a 3D solid."
     header_color = "#b48ead"
 
     def setup_ports(self) -> None:
-        self.add_input("Profile", PortType.ANY, description="PolylineData or List[Point3D]")
+        self.add_input("Profile", PortType.ANY, description="FaceData, MeshData, PolylineData, or List[Point3D]")
         self.add_input("Height", PortType.NUMBER, 3.0)
         self.add_input("Direction", PortType.VECTOR, Vector3D(0, 0, 1))
         self.add_output("Mesh", PortType.MESH, "Extruded solid mesh")
@@ -1333,6 +1348,61 @@ class ExtrudeNode(NodeBase):
         else:
             v = Vector3D(0, 0, h)
 
+        # 1. Direct FaceData extrusion (with holes)
+        if isinstance(prof, FaceData) and len(prof.vertices) >= 3:
+            all_faces = [
+                FaceData(vertices=list(reversed(prof.vertices)), holes=[list(reversed(h_loop)) for h_loop in prof.holes]),
+                FaceData(vertices=[p.translated(v) for p in prof.vertices], holes=[[p.translated(v) for p in h_loop] for h_loop in prof.holes])
+            ]
+            all_edges = []
+            n_o = len(prof.vertices)
+            for i in range(n_o):
+                nxt = (i + 1) % n_o
+                p0, p1 = prof.vertices[i], prof.vertices[nxt]
+                all_faces.append(FaceData([p0, p1, p1.translated(v), p0.translated(v)]))
+                all_edges.append(EdgeData(p0, p1))
+                all_edges.append(EdgeData(p0.translated(v), p1.translated(v)))
+                all_edges.append(EdgeData(p0, p0.translated(v)))
+            for h_loop in prof.holes:
+                n_h = len(h_loop)
+                for i in range(n_h):
+                    nxt = (i + 1) % n_h
+                    p0, p1 = h_loop[i], h_loop[nxt]
+                    all_faces.append(FaceData([p1, p0, p0.translated(v), p1.translated(v)]))
+                    all_edges.append(EdgeData(p0, p1))
+                    all_edges.append(EdgeData(p0.translated(v), p1.translated(v)))
+                    all_edges.append(EdgeData(p0, p0.translated(v)))
+            self.set_output("Mesh", MeshData(faces=all_faces, edges=all_edges, name="Extrusion"))
+            return
+
+        # 2. MeshData containing FaceData
+        if isinstance(prof, MeshData) and prof.faces:
+            all_faces = []
+            all_edges = []
+            for face in prof.faces:
+                if len(face.vertices) < 3:
+                    continue
+                all_faces.append(FaceData(vertices=list(reversed(face.vertices)), holes=[list(reversed(h_loop)) for h_loop in face.holes]))
+                all_faces.append(FaceData(vertices=[p.translated(v) for p in face.vertices], holes=[[p.translated(v) for p in h_loop] for h_loop in face.holes]))
+                n_o = len(face.vertices)
+                for i in range(n_o):
+                    nxt = (i + 1) % n_o
+                    p0, p1 = face.vertices[i], face.vertices[nxt]
+                    all_faces.append(FaceData([p0, p1, p1.translated(v), p0.translated(v)]))
+                    all_edges.append(EdgeData(p0, p1))
+                    all_edges.append(EdgeData(p0.translated(v), p1.translated(v)))
+                for h_loop in face.holes:
+                    n_h = len(h_loop)
+                    for i in range(n_h):
+                        nxt = (i + 1) % n_h
+                        p0, p1 = h_loop[i], h_loop[nxt]
+                        all_faces.append(FaceData([p1, p0, p0.translated(v), p1.translated(v)]))
+                        all_edges.append(EdgeData(p0, p1))
+                        all_edges.append(EdgeData(p0.translated(v), p1.translated(v)))
+            self.set_output("Mesh", MeshData(faces=all_faces, edges=all_edges, name="Extrusion"))
+            return
+
+        # 3. PolylineData or list of points
         profiles: List[PolylineData] = []
         if isinstance(prof, PolylineData):
             profiles = [prof]
@@ -1359,28 +1429,593 @@ class ExtrudeNode(NodeBase):
         self.set_output("Mesh", MeshData(faces=all_faces, edges=all_edges, name="Extrusion"))
 
 
+# -------------------------------------------------------------------------------------
+# Roof & Face Extraction Helpers
+# -------------------------------------------------------------------------------------
+
+def _extract_surface_boundary_and_holes(
+    surface_raw: Any, extra_holes_raw: Any = None
+) -> Tuple[List[Point3D], List[List[Point3D]]]:
+    """Extract outer boundary vertices and interior hole loops from any surface, face, or curve format."""
+    outer: List[Point3D] = []
+    holes: List[List[Point3D]] = []
+
+    def to_pt3d(v: Any) -> Optional[Point3D]:
+        if isinstance(v, Point3D):
+            return v
+        if hasattr(v, "x") and hasattr(v, "y"):
+            x = v.x() if callable(v.x) else v.x
+            y = v.y() if callable(v.y) else v.y
+            z = (v.z() if callable(v.z) else v.z) if hasattr(v, "z") else 0.0
+            return Point3D(float(x), float(y), float(z))
+        if isinstance(v, (list, tuple)) and len(v) >= 2:
+            return Point3D(float(v[0]), float(v[1]), float(v[2]) if len(v) > 2 else 0.0)
+        return None
+
+    def extract_pts(seq: Any) -> List[Point3D]:
+        if isinstance(seq, PolylineData):
+            return list(seq.points)
+        if isinstance(seq, FaceData):
+            return list(seq.vertices)
+        if isinstance(seq, (list, tuple)):
+            res: List[Point3D] = []
+            for item in seq:
+                p = to_pt3d(item)
+                if p:
+                    res.append(p)
+            return res
+        return []
+
+    # 1. Primary surface input
+    if isinstance(surface_raw, FaceData):
+        outer = list(surface_raw.vertices)
+        holes = [extract_pts(h) for h in surface_raw.holes if len(extract_pts(h)) >= 3]
+    elif isinstance(surface_raw, MeshData):
+        if surface_raw.faces:
+            outer = list(surface_raw.faces[0].vertices)
+            holes = [extract_pts(h) for h in surface_raw.faces[0].holes if len(extract_pts(h)) >= 3]
+            for extra_face in surface_raw.faces[1:]:
+                f_pts = extract_pts(extra_face.vertices)
+                if len(f_pts) >= 3:
+                    holes.append(f_pts)
+    elif isinstance(surface_raw, PolylineData):
+        outer = list(surface_raw.points)
+    elif isinstance(surface_raw, (list, tuple)):
+        if surface_raw and isinstance(surface_raw[0], (FaceData, PolylineData)):
+            first = surface_raw[0]
+            if isinstance(first, FaceData):
+                outer = list(first.vertices)
+                holes = [extract_pts(h) for h in first.holes if len(extract_pts(h)) >= 3]
+            else:
+                outer = list(first.points)
+            for item in surface_raw[1:]:
+                pts = extract_pts(item)
+                if len(pts) >= 3:
+                    holes.append(pts)
+        else:
+            outer = extract_pts(surface_raw)
+    elif hasattr(surface_raw, "vertices"):
+        outer = extract_pts(surface_raw.vertices)
+        if hasattr(surface_raw, "holes") and surface_raw.holes:
+            for h in surface_raw.holes:
+                pts = extract_pts(h)
+                if len(pts) >= 3:
+                    holes.append(pts)
+
+    # 2. Extra holes input
+    if extra_holes_raw:
+        if isinstance(extra_holes_raw, (FaceData, PolylineData)):
+            pts = extract_pts(extra_holes_raw)
+            if len(pts) >= 3:
+                holes.append(pts)
+        elif isinstance(extra_holes_raw, MeshData):
+            for f in extra_holes_raw.faces:
+                pts = extract_pts(f.vertices)
+                if len(pts) >= 3:
+                    holes.append(pts)
+        elif isinstance(extra_holes_raw, (list, tuple)):
+            if (
+                extra_holes_raw
+                and isinstance(extra_holes_raw[0], (Point3D, tuple, list))
+                and len(extra_holes_raw[0]) in (2, 3)
+                and isinstance(extra_holes_raw[0][0], (int, float))
+            ):
+                pts = extract_pts(extra_holes_raw)
+                if len(pts) >= 3:
+                    holes.append(pts)
+            else:
+                for item in extra_holes_raw:
+                    pts = extract_pts(item)
+                    if len(pts) >= 3:
+                        holes.append(pts)
+
+    return outer, holes
+
+
+def _clean_and_orient_rings(
+    outer: List[Tuple[float, float]],
+    holes: List[List[Tuple[float, float]]],
+    tol: float = 1e-4
+) -> Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]:
+    """Clean duplicate and collinear points, and enforce Counter-Clockwise (CCW) for exterior, Clockwise (CW) for holes."""
+    def clean_ring(pts: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        if len(pts) < 3:
+            return pts
+        res = [pts[0]]
+        for p in pts[1:]:
+            if (p[0] - res[-1][0]) ** 2 + (p[1] - res[-1][1]) ** 2 > tol * tol:
+                res.append(p)
+        if len(res) > 2 and (res[0][0] - res[-1][0]) ** 2 + (res[0][1] - res[-1][1]) ** 2 <= tol * tol:
+            res.pop()
+
+        cleaned = []
+        n = len(res)
+        for i in range(n):
+            p_prev = res[(i - 1) % n]
+            p_curr = res[i]
+            p_next = res[(i + 1) % n]
+            dx1 = p_curr[0] - p_prev[0]
+            dy1 = p_curr[1] - p_prev[1]
+            dx2 = p_next[0] - p_curr[0]
+            dy2 = p_next[1] - p_curr[1]
+            cross = dx1 * dy2 - dy1 * dx2
+            l1 = math.hypot(dx1, dy1)
+            l2 = math.hypot(dx2, dy2)
+            if l1 > tol and l2 > tol:
+                sin_a = abs(cross) / (l1 * l2)
+                if sin_a > 1e-4:
+                    cleaned.append(p_curr)
+            else:
+                cleaned.append(p_curr)
+        return cleaned if len(cleaned) >= 3 else res
+
+    def ensure_winding(pts: List[Tuple[float, float]], ccw: bool = True) -> List[Tuple[float, float]]:
+        if len(pts) < 3:
+            return pts
+        area = sum(pts[i][0] * pts[(i + 1) % len(pts)][1] - pts[(i + 1) % len(pts)][0] * pts[i][1] for i in range(len(pts))) * 0.5
+        if (ccw and area < 0) or (not ccw and area > 0):
+            return list(reversed(pts))
+        return pts
+
+    c_outer = ensure_winding(clean_ring(outer), ccw=True)
+    c_holes: List[List[Tuple[float, float]]] = []
+    for h in holes:
+        cl_h = clean_ring(h)
+        if len(cl_h) >= 3:
+            c_holes.append(ensure_winding(cl_h, ccw=False))
+
+    return c_outer, c_holes
+
+
 @register_node
 class FaceFromPointsNode(NodeBase):
     name = "Face from Points"
     category = "Solids"
-    description = "Create a planar polygonal face from a closed loop of points."
+    description = "Create a planar polygonal face from a closed boundary loop of points and optional hole loops."
     header_color = "#b48ead"
 
     def setup_ports(self) -> None:
-        self.add_input("Points", PortType.ANY, description="List[Point3D]")
-        self.add_output("Mesh", PortType.MESH)
+        self.add_input("Points", PortType.ANY, description="Outer boundary (PolylineData or List[Point3D])")
+        self.add_input("Holes", PortType.ANY, description="Optional hole loops (FaceData, PolylineData, or List[Point3D])")
+        self.add_output("Mesh", PortType.MESH, "Face mesh representation")
+        self.add_output("Face", PortType.ANY, "FaceData object with vertices and holes")
 
     def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
         pts_in = self.get_input("Points")
-        pts: List[Point3D] = []
-        if isinstance(pts_in, PolylineData):
-            pts = pts_in.points
-        elif isinstance(pts_in, list):
-            pts = [p for p in pts_in if isinstance(p, Point3D)]
+        holes_in = self.get_input("Holes")
+        outer_pts, holes_pts = _extract_surface_boundary_and_holes(pts_in, holes_in)
 
-        if len(pts) >= 3:
-            face = FaceData(vertices=pts)
-            self.set_output("Mesh", MeshData(faces=[face]))
+        if len(outer_pts) >= 3:
+            face = FaceData(vertices=outer_pts, holes=holes_pts)
+            self.set_output("Mesh", MeshData(faces=[face], name="FaceMesh"))
+            self.set_output("Face", face)
+        else:
+            self.set_output("Mesh", MeshData())
+            self.set_output("Face", None)
+
+
+@register_node
+class RoofFromSurfaceNode(NodeBase):
+    name = "Roof from Surface"
+    category = "Solids"
+    description = (
+        "Generate a 3D parametric roof (Hip / Straight Skeleton, Gable, Shed, Flat/Parapet, Mansard) "
+        "from a planar surface or face with optional courtyard/interior holes. "
+        "Computes exact ridges, hips, valleys, eaves, and 3D watertight solid mesh."
+    )
+    header_color = "#bf616a"
+
+    def setup_ports(self) -> None:
+        self.add_input("Surface", PortType.ANY, description="Planar surface/face (FaceData, MeshData, or Polyline) with optional holes")
+        self.add_input("Holes", PortType.ANY, description="Optional extra hole loops (FaceData, Polyline, or List[Point3D])")
+        self.add_input("Angle", PortType.NUMBER, 35.0, "Roof pitch / slope angle in degrees (e.g. 30° to 45°)")
+        self.add_input("Style", PortType.INTEGER, 0, "0: Hip (Straight Skeleton), 1: Gable, 2: Shed, 3: Flat / Parapet, 4: Mansard")
+        self.add_input("Overhang", PortType.NUMBER, 0.3, "Eave overhang distance outside wall boundary (m)")
+        self.add_input("Thickness", PortType.NUMBER, 0.2, "Roof fascia and slab thickness to generate 3D solid (m)")
+        self.add_input("Elevation", PortType.NUMBER, 0.0, "Base elevation offset (m)")
+
+        self.add_output("Mesh", PortType.MESH, "3D solid watertight roof mesh")
+        self.add_output("3D Regions", PortType.ANY, "Individual 3D sloped roof facets (List[PolylineData])")
+        self.add_output("Ridges", PortType.ANY, "Horizontal and upper ridge lines (List[PolylineData])")
+        self.add_output("Hips & Valleys", PortType.ANY, "Diagonal hip and valley crease lines (List[PolylineData])")
+        self.add_output("Eaves", PortType.ANY, "Perimeter eave boundary lines (List[PolylineData])")
+        self.add_output("Roof Points", PortType.ANY, "Top ridge and peak points (List[Point3D])")
+        self.add_output("Heights", PortType.ANY, "Ridge and peak heights above base")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        self.error = None
+        surf_raw = self.get_input("Surface")
+        holes_raw = self.get_input("Holes")
+        angle = max(1.0, min(89.0, float(self.get_input("Angle", 35.0))))
+        style = int(self.get_input("Style", 0))
+        overhang = max(0.0, float(self.get_input("Overhang", 0.3)))
+        thickness = max(0.0, float(self.get_input("Thickness", 0.2)))
+        elevation = float(self.get_input("Elevation", 0.0))
+
+        outer_pts, holes_pts = _extract_surface_boundary_and_holes(surf_raw, holes_raw)
+
+        # Default fallback if disconnected: 24x16m house with an 8x6m courtyard
+        if len(outer_pts) < 3:
+            outer_pts = [
+                Point3D(0.0, 0.0, 3.0),
+                Point3D(24.0, 0.0, 3.0),
+                Point3D(24.0, 16.0, 3.0),
+                Point3D(0.0, 16.0, 3.0)
+            ]
+            holes_pts = [[
+                Point3D(8.0, 5.0, 3.0),
+                Point3D(16.0, 5.0, 3.0),
+                Point3D(16.0, 11.0, 3.0),
+                Point3D(8.0, 11.0, 3.0)
+            ]]
+
+        z_vals = [p.z for p in outer_pts]
+        avg_z = sum(z_vals) / len(z_vals)
+        is_xy = all(abs(p.z - avg_z) < 1e-3 for p in outer_pts)
+
+        if is_xy:
+            z_base = avg_z + elevation
+            u_axis = Vector3D(1, 0, 0)
+            v_axis = Vector3D(0, 1, 0)
+            w_axis = Vector3D(0, 0, 1)
+            origin_3d = Point3D(0, 0, z_base)
+            outer_2d = [(p.x, p.y) for p in outer_pts]
+            holes_2d = [[(p.x, p.y) for p in h] for h in holes_pts]
+        else:
+            normal = FaceData(vertices=outer_pts).normal()
+            if normal.z < 0:
+                normal = Vector3D(-normal.x, -normal.y, -normal.z)
+            w_axis = normal
+            ref = Vector3D(0, 0, 1) if abs(normal.z) < 0.9 else Vector3D(1, 0, 0)
+            u_axis = w_axis.cross(ref).normalized()
+            v_axis = w_axis.cross(u_axis).normalized()
+            origin_3d = outer_pts[0].translated(w_axis * elevation)
+
+            def to_2d(p: Point3D) -> Tuple[float, float]:
+                d = p - origin_3d
+                return (d.dot(u_axis), d.dot(v_axis))
+
+            outer_2d = [to_2d(p) for p in outer_pts]
+            holes_2d = [[to_2d(p) for p in h] for h in holes_pts]
+
+        def to_3d(u: float, v: float, h: float) -> Point3D:
+            return origin_3d + (u_axis * u) + (v_axis * v) + (w_axis * h)
+
+        c_outer, c_holes = _clean_and_orient_rings(outer_2d, holes_2d)
+
+        # Apply overhang buffer if requested
+        if overhang > 1e-4 and Polygon is not None:
+            try:
+                poly_ext = Polygon(c_outer).buffer(overhang, join_style="mitre", mitre_limit=3.0)
+                if not poly_ext.is_empty and poly_ext.geom_type == "Polygon":
+                    c_outer = list(poly_ext.exterior.coords)[:-1]
+
+                new_holes = []
+                for h_ring in c_holes:
+                    h_poly = Polygon(h_ring).buffer(-overhang, join_style="mitre", mitre_limit=3.0)
+                    if not h_poly.is_empty and h_poly.geom_type == "Polygon" and h_poly.area > 0.1:
+                        new_holes.append(list(h_poly.exterior.coords)[:-1])
+                    elif h_poly.is_empty or h_poly.area <= 0.1:
+                        pass
+                    else:
+                        new_holes.append(h_ring)
+                c_holes = new_holes
+                c_outer, c_holes = _clean_and_orient_rings(c_outer, c_holes)
+            except Exception:
+                pass
+
+        top_faces: List[FaceData] = []
+        ridge_lines: List[PolylineData] = []
+        hip_lines: List[PolylineData] = []
+        eave_lines: List[PolylineData] = []
+        roof_points: List[Point3D] = []
+        heights_out: List[float] = []
+        regions_3d: List[PolylineData] = []
+        explicit_edges: List[EdgeData] = []
+
+        rad = math.radians(angle)
+        tan_a = math.tan(rad)
+
+        # -----------------------------------------------------------------------------
+        # Style 0: Hip (Straight Skeleton)
+        # -----------------------------------------------------------------------------
+        if style == 0 and compute_skeleton is not None:
+            try:
+                skel = compute_skeleton(c_outer, c_holes)
+                skel_faces = skel.get_faces()
+
+                for face_indices in skel_faces:
+                    facet_pts_3d: List[Point3D] = []
+                    for idx in face_indices:
+                        node = skel.nodes[idx]
+                        dist_val = max(0.0, float(node.time))
+                        h = dist_val * tan_a
+                        pt3d = to_3d(node.position.x, node.position.y, h)
+                        facet_pts_3d.append(pt3d)
+
+                    cleaned_facet: List[Point3D] = []
+                    for p in facet_pts_3d:
+                        if not cleaned_facet or cleaned_facet[-1].distance_to(p) > 1e-4:
+                            cleaned_facet.append(p)
+                    if len(cleaned_facet) > 2 and cleaned_facet[0].distance_to(cleaned_facet[-1]) <= 1e-4:
+                        cleaned_facet.pop()
+
+                    if len(cleaned_facet) >= 3:
+                        top_faces.append(FaceData(vertices=cleaned_facet, color=(0.78, 0.38, 0.28)))
+                        regions_3d.append(PolylineData(points=cleaned_facet, closed=True))
+
+                for a_node, b_node in skel.arc_iterator():
+                    pA = to_3d(a_node.position.x, a_node.position.y, max(0.0, a_node.time) * tan_a)
+                    pB = to_3d(b_node.position.x, b_node.position.y, max(0.0, b_node.time) * tan_a)
+                    if pA.distance_to(pB) < 1e-4:
+                        continue
+
+                    if a_node.time > 1e-4 and b_node.time > 1e-4:
+                        ridge_lines.append(PolylineData(points=[pA, pB], closed=False))
+                        explicit_edges.append(EdgeData(pA, pB))
+                    else:
+                        hip_lines.append(PolylineData(points=[pA, pB], closed=False))
+                        explicit_edges.append(EdgeData(pA, pB))
+
+                seen_pts = set()
+                for node in skel.nodes:
+                    if node.time > 1e-4:
+                        h = node.time * tan_a
+                        pt = to_3d(node.position.x, node.position.y, h)
+                        k = (round(pt.x, 3), round(pt.y, 3), round(pt.z, 3))
+                        if k not in seen_pts:
+                            seen_pts.add(k)
+                            roof_points.append(pt)
+                            heights_out.append(h)
+
+            except Exception as ex:
+                self.error = f"Straight skeleton notice: {ex}"
+                style = 1  # Fallback to Gable
+
+        # -----------------------------------------------------------------------------
+        # Style 1: Gable
+        # -----------------------------------------------------------------------------
+        if (style == 1 or not top_faces) and style != 2 and style != 3 and style != 4:
+            xs = [p[0] for p in c_outer]
+            ys = [p[1] for p in c_outer]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            dx = max_x - min_x
+            dy = max_y - min_y
+
+            along_x = dx >= dy
+            if along_x:
+                mid_v = (min_y + max_y) * 0.5
+                half_span = dy * 0.5
+                ridge_h = half_span * tan_a
+                p_r1 = to_3d(min_x - overhang, mid_v, ridge_h)
+                p_r2 = to_3d(max_x + overhang, mid_v, ridge_h)
+            else:
+                mid_v = (min_x + max_x) * 0.5
+                half_span = dx * 0.5
+                ridge_h = half_span * tan_a
+                p_r1 = to_3d(mid_v, min_y - overhang, ridge_h)
+                p_r2 = to_3d(mid_v, max_y + overhang, ridge_h)
+
+            ridge_lines.append(PolylineData(points=[p_r1, p_r2], closed=False))
+            explicit_edges.append(EdgeData(p_r1, p_r2))
+            roof_points.extend([p_r1, p_r2])
+            heights_out.extend([ridge_h, ridge_h])
+
+            if along_x:
+                p_sw = to_3d(min_x - overhang, min_y, 0.0)
+                p_se = to_3d(max_x + overhang, min_y, 0.0)
+                s_facet = [p_sw, p_se, p_r2, p_r1]
+                top_faces.append(FaceData(vertices=s_facet, color=(0.78, 0.38, 0.28)))
+                regions_3d.append(PolylineData(points=s_facet, closed=True))
+
+                p_nw = to_3d(min_x - overhang, max_y, 0.0)
+                p_ne = to_3d(max_x + overhang, max_y, 0.0)
+                n_facet = [p_r1, p_r2, p_ne, p_nw]
+                top_faces.append(FaceData(vertices=n_facet, color=(0.78, 0.38, 0.28)))
+                regions_3d.append(PolylineData(points=n_facet, closed=True))
+
+                top_faces.append(FaceData(vertices=[p_sw, p_r1, p_nw], color=(0.75, 0.72, 0.70)))
+                top_faces.append(FaceData(vertices=[p_se, p_ne, p_r2], color=(0.75, 0.72, 0.70)))
+            else:
+                p_sw = to_3d(min_x, min_y - overhang, 0.0)
+                p_nw = to_3d(min_x, max_y + overhang, 0.0)
+                w_facet = [p_sw, p_r1, p_r2, p_nw]
+                top_faces.append(FaceData(vertices=w_facet, color=(0.78, 0.38, 0.28)))
+                regions_3d.append(PolylineData(points=w_facet, closed=True))
+
+                p_se = to_3d(max_x, min_y - overhang, 0.0)
+                p_ne = to_3d(max_x, max_y + overhang, 0.0)
+                e_facet = [p_r1, p_se, p_ne, p_r2]
+                top_faces.append(FaceData(vertices=e_facet, color=(0.78, 0.38, 0.28)))
+                regions_3d.append(PolylineData(points=e_facet, closed=True))
+
+                top_faces.append(FaceData(vertices=[p_sw, p_se, p_r1], color=(0.75, 0.72, 0.70)))
+                top_faces.append(FaceData(vertices=[p_nw, p_r2, p_ne], color=(0.75, 0.72, 0.70)))
+
+        # -----------------------------------------------------------------------------
+        # Style 2: Shed / Mono-Pitch
+        # -----------------------------------------------------------------------------
+        elif style == 2:
+            xs = [p[0] for p in c_outer]
+            ys = [p[1] for p in c_outer]
+            min_y, max_y = min(ys), max(ys)
+            span_y = max(1.0, max_y - min_y)
+
+            lifted_outer = [to_3d(p[0], p[1], ((p[1] - min_y) / span_y) * span_y * tan_a) for p in c_outer]
+            lifted_holes = [
+                [to_3d(p[0], p[1], ((p[1] - min_y) / span_y) * span_y * tan_a) for p in h_ring]
+                for h_ring in c_holes
+            ]
+            top_faces.append(FaceData(vertices=lifted_outer, holes=lifted_holes, color=(0.78, 0.38, 0.28)))
+            regions_3d.append(PolylineData(points=lifted_outer, closed=True))
+            high_pts = [p for p in lifted_outer if p.z >= avg_z + elevation + span_y * tan_a * 0.9]
+            if len(high_pts) >= 2:
+                ridge_lines.append(PolylineData(points=[high_pts[0], high_pts[-1]], closed=False))
+            roof_points.extend(lifted_outer)
+            heights_out.append(span_y * tan_a)
+
+        # -----------------------------------------------------------------------------
+        # Style 3: Flat / Parapet
+        # -----------------------------------------------------------------------------
+        elif style == 3:
+            parapet_h = max(0.3, thickness * 2.0)
+            slab_outer = [to_3d(p[0], p[1], thickness) for p in c_outer]
+            slab_holes = [[to_3d(p[0], p[1], thickness) for p in h_ring] for h_ring in c_holes]
+            top_faces.append(FaceData(vertices=slab_outer, holes=slab_holes, color=(0.65, 0.68, 0.70)))
+            regions_3d.append(PolylineData(points=slab_outer, closed=True))
+
+            p_top_outer = [to_3d(p[0], p[1], thickness + parapet_h) for p in c_outer]
+            n_o = len(c_outer)
+            for i in range(n_o):
+                nxt = (i + 1) % n_o
+                p0 = slab_outer[i]
+                p1 = slab_outer[nxt]
+                t1 = p_top_outer[nxt]
+                t0 = p_top_outer[i]
+                top_faces.append(FaceData(vertices=[p0, p1, t1, t0], color=(0.55, 0.58, 0.60)))
+                explicit_edges.append(EdgeData(t0, t1))
+            roof_points.extend(p_top_outer)
+            heights_out.append(parapet_h)
+
+        # -----------------------------------------------------------------------------
+        # Style 4: Mansard / Gambrel
+        # -----------------------------------------------------------------------------
+        elif style == 4 and compute_skeleton is not None:
+            try:
+                skel = compute_skeleton(c_outer, c_holes)
+                skel_faces = skel.get_faces()
+                max_d = max(node.time for node in skel.nodes) if skel.nodes else 1.0
+                d_trans = max_d * 0.45
+                h_trans = d_trans * math.tan(math.radians(65.0))
+
+                for face_indices in skel_faces:
+                    facet_pts_3d: List[Point3D] = []
+                    for idx in face_indices:
+                        node = skel.nodes[idx]
+                        dist_val = max(0.0, float(node.time))
+                        if dist_val <= d_trans:
+                            h = dist_val * math.tan(math.radians(65.0))
+                        else:
+                            h = h_trans + (dist_val - d_trans) * math.tan(math.radians(22.0))
+                        facet_pts_3d.append(to_3d(node.position.x, node.position.y, h))
+
+                    cleaned_facet: List[Point3D] = []
+                    for p in facet_pts_3d:
+                        if not cleaned_facet or cleaned_facet[-1].distance_to(p) > 1e-4:
+                            cleaned_facet.append(p)
+                    if len(cleaned_facet) > 2 and cleaned_facet[0].distance_to(cleaned_facet[-1]) <= 1e-4:
+                        cleaned_facet.pop()
+
+                    if len(cleaned_facet) >= 3:
+                        top_faces.append(FaceData(vertices=cleaned_facet, color=(0.72, 0.32, 0.25)))
+                        regions_3d.append(PolylineData(points=cleaned_facet, closed=True))
+
+                for a_node, b_node in skel.arc_iterator():
+                    distA = max(0.0, a_node.time)
+                    hA = distA * math.tan(math.radians(65.0)) if distA <= d_trans else h_trans + (distA - d_trans) * math.tan(math.radians(22.0))
+                    distB = max(0.0, b_node.time)
+                    hB = distB * math.tan(math.radians(65.0)) if distB <= d_trans else h_trans + (distB - d_trans) * math.tan(math.radians(22.0))
+
+                    pA = to_3d(a_node.position.x, a_node.position.y, hA)
+                    pB = to_3d(b_node.position.x, b_node.position.y, hB)
+                    if a_node.time > d_trans and b_node.time > d_trans:
+                        ridge_lines.append(PolylineData(points=[pA, pB], closed=False))
+                        explicit_edges.append(EdgeData(pA, pB))
+                    else:
+                        hip_lines.append(PolylineData(points=[pA, pB], closed=False))
+                        explicit_edges.append(EdgeData(pA, pB))
+            except Exception as ex:
+                self.error = f"Mansard notice: {ex}"
+
+        # -----------------------------------------------------------------------------
+        # Eave Lines (Outer Perimeter and Holes)
+        # -----------------------------------------------------------------------------
+        outer_eave_pts = [to_3d(p[0], p[1], 0.0) for p in c_outer]
+        eave_lines.append(PolylineData(points=outer_eave_pts, closed=True))
+        for h_ring in c_holes:
+            h_eave_pts = [to_3d(p[0], p[1], 0.0) for p in h_ring]
+            eave_lines.append(PolylineData(points=h_eave_pts, closed=True))
+
+        for ev in eave_lines:
+            for i in range(len(ev.points)):
+                nxt = (i + 1) % len(ev.points)
+                explicit_edges.append(EdgeData(ev.points[i], ev.points[nxt]))
+
+        # -----------------------------------------------------------------------------
+        # Watertight Solid Generation (Thickness > 0)
+        # -----------------------------------------------------------------------------
+        all_mesh_faces: List[FaceData] = list(top_faces)
+        if thickness > 1e-4:
+            soffit_faces: List[FaceData] = []
+            for tf in top_faces:
+                soffit_verts = [p.translated(w_axis * (-thickness)) for p in reversed(tf.vertices)]
+                soffit_holes = [[p.translated(w_axis * (-thickness)) for p in reversed(h)] for h in tf.holes] if tf.holes else []
+                soffit_faces.append(FaceData(vertices=soffit_verts, holes=soffit_holes, color=(0.82, 0.82, 0.80)))
+
+            all_mesh_faces.extend(soffit_faces)
+
+            # Fascia along outer perimeter
+            n_o = len(outer_eave_pts)
+            for i in range(n_o):
+                nxt = (i + 1) % n_o
+                p0 = outer_eave_pts[i]
+                p1 = outer_eave_pts[nxt]
+                p0_b = p0.translated(w_axis * (-thickness))
+                p1_b = p1.translated(w_axis * (-thickness))
+                all_mesh_faces.append(FaceData(vertices=[p0, p1, p1_b, p0_b], color=(0.35, 0.35, 0.38)))
+                explicit_edges.append(EdgeData(p0, p0_b))
+                explicit_edges.append(EdgeData(p0_b, p1_b))
+
+            # Fascia along courtyard hole eaves
+            for h_ring in c_holes:
+                h_eave_pts = [to_3d(p[0], p[1], 0.0) for p in h_ring]
+                n_h = len(h_eave_pts)
+                for i in range(n_h):
+                    nxt = (i + 1) % n_h
+                    p0 = h_eave_pts[i]
+                    p1 = h_eave_pts[nxt]
+                    p0_b = p0.translated(w_axis * (-thickness))
+                    p1_b = p1.translated(w_axis * (-thickness))
+                    all_mesh_faces.append(FaceData(vertices=[p1, p0, p0_b, p1_b], color=(0.35, 0.35, 0.38)))
+                    explicit_edges.append(EdgeData(p0, p0_b))
+                    explicit_edges.append(EdgeData(p0_b, p1_b))
+
+        solid_mesh = MeshData(
+            faces=all_mesh_faces,
+            edges=explicit_edges,
+            name="ParametricRoof",
+            layer="Roof"
+        )
+
+        self.set_output("Mesh", solid_mesh)
+        self.set_output("3D Regions", regions_3d)
+        self.set_output("Ridges", ridge_lines)
+        self.set_output("Hips & Valleys", hip_lines)
+        self.set_output("Eaves", eave_lines)
+        self.set_output("Roof Points", roof_points)
+        self.set_output("Heights", heights_out)
+
 
 
 @register_node
@@ -1826,4 +2461,214 @@ class IngeTrazoOutputNode(NodeBase):
         except Exception as ex:
             import logging
             logging.getLogger("ingetrazo.plugins.node_editor").error(f"Error baking to IngeTrazo: {ex}", exc_info=True)
+
+
+@register_node
+class ReferenceFaceNode(NodeBase):
+    name = "Reference Face"
+    category = "Scene"
+    description = (
+        "Reference a face or surface from the IngeTrazo 3D viewport into the node graph.\n"
+        "Click '📌 Set Selected Face' on the node to store the currently selected face.\n"
+        "Automatically extracts the outer perimeter and all courtyard/interior holes.\n"
+        "The referenced face is saved directly in the file (.itgraph) so it is remembered\n"
+        "when reopening. Each Reference Face node can store a different face for different roofs."
+    )
+    header_color = "#5e81ac"
+
+    def setup_ports(self) -> None:
+        self.add_output("Surface", PortType.ANY, "FaceData with outer boundary and all holes")
+        self.add_output("Mesh", PortType.MESH, "Preview mesh of the referenced face")
+        self.add_output("Outer", PortType.CURVE, "Outer boundary polyline")
+        self.add_output("Holes", PortType.ANY, "List of interior hole polylines")
+
+    # ------------------------------------------------------------------
+    # Point Conversion and Geometry Extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_pt3d(p: Any) -> Optional[Point3D]:
+        """Convert any IngeTrazo Vertex, QVector3D, or coordinate tuple to Point3D."""
+        if p is None:
+            return None
+        if isinstance(p, Point3D):
+            return p
+        if hasattr(p, "position"):
+            pos = p.position
+            return Point3D(float(pos.x()), float(pos.y()), float(pos.z()))
+        if hasattr(p, "x"):
+            x = float(p.x() if callable(p.x) else p.x)
+            y = float(p.y() if callable(p.y) else p.y)
+            z = float(p.z() if callable(p.z) else p.z)
+            return Point3D(x, y, z)
+        if isinstance(p, (list, tuple)) and len(p) >= 3:
+            return Point3D(float(p[0]), float(p[1]), float(p[2]))
+        return None
+
+    @staticmethod
+    def _extract_face_loops(f: Any) -> Tuple[List[Point3D], List[List[Point3D]]]:
+        """Extract outer vertices and holes from an IngeTrazo Face object."""
+        _to = ReferenceFaceNode._to_pt3d
+        outer: List[Point3D] = []
+        holes: List[List[Point3D]] = []
+
+        # 1. Outer boundary
+        raw_verts = getattr(f, "vertices", None)
+        if raw_verts is None:
+            raw_loop = getattr(f, "loop", None)
+            raw_verts = [getattr(v, "position", v) for v in raw_loop] if raw_loop else []
+
+        if raw_verts:
+            for v in raw_verts:
+                pt = _to(v)
+                if pt:
+                    outer.append(pt)
+
+        # 2. Native holes
+        raw_holes = getattr(f, "holes", None) or []
+        for h_ring in raw_holes:
+            h_pts = []
+            for hv in h_ring:
+                pt = _to(hv)
+                if pt:
+                    h_pts.append(pt)
+            if len(h_pts) >= 3:
+                holes.append(h_pts)
+
+        return outer, holes
+
+    def reference_from_selection(self, app: Any = None) -> Tuple[str, bool]:
+        """Extract the selected face/group from the active IngeTrazo viewport and save it into widget_values."""
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                win = getattr(QApplication.instance(), "_extension_app_handle", None)
+                app = win
+            except Exception:
+                app = None
+
+        if not app:
+            return ("No IngeTrazo app handle", False)
+
+        viewport = getattr(app, "viewport", None)
+        if not viewport:
+            return ("No viewport found", False)
+        scene = getattr(viewport, "scene", None)
+        if not scene:
+            return ("No scene found", False)
+
+        sel = getattr(scene, "selection", None) or getattr(viewport, "selection", None)
+        if not sel:
+            return ("Please select a face in 3D first!", False)
+
+        collected_faces: List[Tuple[List[Point3D], List[List[Point3D]]]] = []
+
+        for item in sel:
+            # Direct Face object
+            if hasattr(item, "vertices") or hasattr(item, "loop"):
+                o, h = self._extract_face_loops(item)
+                if len(o) >= 3:
+                    collected_faces.append((o, h))
+            # Group object
+            elif hasattr(item, "mesh") and hasattr(item.mesh, "faces"):
+                for gf in item.mesh.faces:
+                    o, h = self._extract_face_loops(gf)
+                    if len(o) >= 3:
+                        collected_faces.append((o, h))
+
+        if not collected_faces:
+            return ("Selected item has no planar faces", False)
+
+        # If a single face with native holes was selected:
+        if len(collected_faces) == 1:
+            outer, holes = collected_faces[0]
+        else:
+            # Multiple coplanar faces selected (e.g. drawn in pieces or outer + inner loop)
+            # Find largest face as outer boundary
+            def face_area(pts: List[Point3D]) -> float:
+                if len(pts) < 3:
+                    return 0.0
+                nx = ny = nz = 0.0
+                n = len(pts)
+                for i in range(n):
+                    a, b = pts[i], pts[(i + 1) % n]
+                    nx += (a.y - b.y) * (a.z + b.z)
+                    ny += (a.z - b.z) * (a.x + b.x)
+                    nz += (a.x - b.x) * (a.y + b.y)
+                return (nx * nx + ny * ny + nz * nz) ** 0.5 * 0.5
+
+            collected_faces.sort(key=lambda item: face_area(item[0]), reverse=True)
+            outer, holes = collected_faces[0]
+            # Extra faces inside the outer boundary are interior holes
+            for extra_o, extra_h in collected_faces[1:]:
+                holes.append(extra_o)
+                holes.extend(extra_h)
+
+        # Store serialized plain coordinates into widget_values for file persistence
+        summary_txt = f"{len(outer)} pts" + (f", {len(holes)} hole(s)" if holes else "")
+        self.widget_values["referenced_face"] = {
+            "outer": [[p.x, p.y, p.z] for p in outer],
+            "holes": [[[p.x, p.y, p.z] for p in h] for h in holes],
+            "summary": summary_txt
+        }
+        self.dirty = True
+        return (f"Saved: {summary_txt}", True)
+
+    def clear_reference(self) -> None:
+        """Clear stored referenced face."""
+        if "referenced_face" in self.widget_values:
+            del self.widget_values["referenced_face"]
+        self.dirty = True
+
+    # ------------------------------------------------------------------
+    # Node compute
+    # ------------------------------------------------------------------
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        outer: List[Point3D] = []
+        holes: List[List[Point3D]] = []
+
+        # 1. Use stored referenced face from widget_values (persisted across save/reopen)
+        saved = self.widget_values.get("referenced_face")
+        if saved and isinstance(saved, dict) and "outer" in saved:
+            outer = [Point3D(float(pt[0]), float(pt[1]), float(pt[2])) for pt in saved.get("outer", [])]
+            holes = [
+                [Point3D(float(pt[0]), float(pt[1]), float(pt[2])) for pt in h_ring]
+                for h_ring in saved.get("holes", [])
+            ]
+
+        # 2. If nothing stored yet, attempt reading active live selection
+        if len(outer) < 3 and context and "app" in context:
+            self.reference_from_selection(context["app"])
+            saved = self.widget_values.get("referenced_face")
+            if saved and isinstance(saved, dict) and "outer" in saved:
+                outer = [Point3D(float(pt[0]), float(pt[1]), float(pt[2])) for pt in saved.get("outer", [])]
+                holes = [
+                    [Point3D(float(pt[0]), float(pt[1]), float(pt[2])) for pt in h_ring]
+                    for h_ring in saved.get("holes", [])
+                ]
+
+        # 3. Fallback: courtyard house (24x16m with 8x6m hole)
+        if len(outer) < 3:
+            outer = [
+                Point3D(0.0, 0.0, 0.0),
+                Point3D(24.0, 0.0, 0.0),
+                Point3D(24.0, 16.0, 0.0),
+                Point3D(0.0, 16.0, 0.0),
+            ]
+            holes = [[
+                Point3D(8.0, 5.0, 0.0),
+                Point3D(16.0, 5.0, 0.0),
+                Point3D(16.0, 11.0, 0.0),
+                Point3D(8.0, 11.0, 0.0),
+            ]]
+
+        face = FaceData(vertices=outer, holes=holes, color=(0.82, 0.86, 0.90))
+        outer_poly = PolylineData(points=outer, closed=True)
+        holes_poly = [PolylineData(points=h, closed=True) for h in holes]
+
+        self.set_output("Surface", face)
+        self.set_output("Mesh", MeshData(faces=[face], name="ReferencedFace"))
+        self.set_output("Outer", outer_poly)
+        self.set_output("Holes", holes_poly)
 

@@ -106,6 +106,9 @@ class NodeItem(QGraphicsObject):
             if t_name == "PanelNode":
                 content_height += 124.0
                 self.width = max(self.width, 220.0)
+            elif t_name == "ReferenceFaceNode":
+                content_height += 62.0
+                self.width = max(self.width, 210.0)
             else:
                 content_height += 44.0
                 self.width = max(self.width, 220.0 if t_name == "ExpressionNode" else 210.0)
@@ -134,7 +137,7 @@ class NodeItem(QGraphicsObject):
 
     def has_custom_widget(self) -> bool:
         t = self.node.__class__.__name__
-        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode", "PanelNode")
+        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode", "PanelNode", "ReferenceFaceNode")
 
     def add_embedded_widget(self) -> None:
         t = self.node.__class__.__name__
@@ -450,6 +453,59 @@ class NodeItem(QGraphicsObject):
             pte.textChanged.connect(on_panel_text)
             layout.addWidget(pte)
 
+        elif t == "ReferenceFaceNode":
+            from PySide6.QtWidgets import QPushButton
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(8, 0, 8, 4)
+            layout.setSpacing(3)
+
+            btn = QPushButton("📌 Set Selected Face")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #3b4252;
+                    color: #eceff4;
+                    border: 1px solid #4c566a;
+                    border-radius: 4px;
+                    padding: 3px 6px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #434c5e;
+                    border: 1px solid #88c0d0;
+                    color: #88c0d0;
+                }
+                QPushButton:pressed {
+                    background: #2e3440;
+                }
+            """)
+
+            saved_ref = self.node.widget_values.get("referenced_face")
+            init_txt = f"Saved: {saved_ref.get('summary', '')}" if saved_ref else "No face stored (Click to set)"
+            lbl_status = QLabel(init_txt)
+            lbl_status.setAlignment(Qt.AlignCenter)
+            lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;" if saved_ref else "color: #d8dee9; font-size: 10px; font-style: italic;")
+
+            def on_pick():
+                app = getattr(self.scene(), "app", None)
+                if not app:
+                    from PySide6.QtWidgets import QApplication
+                    app = getattr(QApplication.instance(), "_extension_app_handle", None)
+                msg, ok = self.node.reference_from_selection(app)
+                lbl_status.setText(msg)
+                if ok:
+                    lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;")
+                else:
+                    lbl_status.setStyleSheet("color: #ebcb8b; font-size: 10px;")
+                self.node.dirty = True
+                if self.scene():
+                    self.scene().notify_graph_changed()
+
+            btn.clicked.connect(on_pick)
+            layout.addWidget(btn)
+            layout.addWidget(lbl_status)
+
         self.widget_proxy = proxy
         proxy.setWidget(container)
         if t == "PanelNode":
@@ -457,6 +513,10 @@ class NodeItem(QGraphicsObject):
             widget_h = self.height - widget_y - 8.0
             proxy.setPos(0, widget_y)
             proxy.resize(self.width, max(40.0, widget_h))
+        elif t == "ReferenceFaceNode":
+            widget_y = self.height - 58.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, 52.0)
         else:
             widget_y = self.height - 38.0
             proxy.setPos(0, widget_y)

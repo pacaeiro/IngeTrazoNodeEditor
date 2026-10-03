@@ -13,9 +13,14 @@ Features:
 """
 from __future__ import annotations
 
+import sys
 import logging
 from typing import Optional, Any
 from pathlib import Path
+
+_pkg_dir = str(Path(__file__).resolve().parent)
+if _pkg_dir not in sys.path:
+    sys.path.insert(0, _pkg_dir)
 
 try:
     from tools.base import Tool
