@@ -36,7 +36,7 @@ A visual parametric node editor extension for **[IngeTrazo](https://github.com/i
 - **Real-Time Live Viewport Sync:**
   - Dragging sliders on the canvas live-streams parametric geometry directly into IngeTrazo's 3D viewport.
 - **Parametric Node Catalog:**
-  - **Inputs:** Number Slider (live float/int), Value Box, Toggle Switch, Vector XYZ, Text String.
+  - **Inputs & Inspection:** Number Slider (live float/int), Value Box, Toggle Switch, Vector XYZ, Text String, **Panel** (inspect and view any data with indexed list formatting `[0] ...`, or input multiline text and constants with scrollable monospace editor).
   - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator, **Divide Range** (linear interpolation / linspace domain division with start, end, count, and step size output), **Expression Node** (safe AST evaluator supporting formulas like `sin(x)*cos(y)`, `sqrt(x*x + y*y)`, variable aliases `x/y/z`, `u/v/w`, `a/b/c`, list broadcasting, and on-node code widget).
   - **List Operations:** **Cross Reference** (Cartesian product of two lists $A \times B$ pairing every element of A with every element of B for grid and coordinate synthesis).
   - **Points & Vectors:** Construct Point (supports list inputs), Deconstruct Point, Vector Math, Distance, 2D Grid Array.

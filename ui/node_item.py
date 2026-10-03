@@ -9,7 +9,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsObject, QGraphicsProxyWidget,
-    QSlider, QDoubleSpinBox, QCheckBox, QLineEdit, QWidget, QHBoxLayout, QVBoxLayout, QLabel
+    QSlider, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QWidget, QHBoxLayout, QVBoxLayout, QLabel
 )
 
 from ..engine import NodeBase, Port, PortType
@@ -97,8 +97,13 @@ class NodeItem(QGraphicsObject):
         # Check if node has embedded widget
         has_widget = self.has_custom_widget()
         if has_widget:
-            content_height += 44.0
-            self.width = max(self.width, 220.0 if self.node.__class__.__name__ == "ExpressionNode" else 210.0)
+            t_name = self.node.__class__.__name__
+            if t_name == "PanelNode":
+                content_height += 124.0
+                self.width = max(self.width, 220.0)
+            else:
+                content_height += 44.0
+                self.width = max(self.width, 220.0 if t_name == "ExpressionNode" else 210.0)
 
         self.height = self.HEADER_HEIGHT + content_height + 10.0
 
@@ -124,7 +129,7 @@ class NodeItem(QGraphicsObject):
 
     def has_custom_widget(self) -> bool:
         t = self.node.__class__.__name__
-        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode")
+        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode", "PanelNode")
 
     def add_embedded_widget(self) -> None:
         t = self.node.__class__.__name__
@@ -344,10 +349,97 @@ class NodeItem(QGraphicsObject):
             le.textChanged.connect(on_expr_changed)
             layout.addWidget(le)
 
+        elif t == "PanelNode":
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(6, 0, 6, 4)
+            layout.setSpacing(0)
+
+            pte = QPlainTextEdit()
+            pte.setPlaceholderText("// Double-click or type data...\n// or connect wire to view data")
+            pte.setStyleSheet("""
+                QPlainTextEdit {
+                    background: #181a20;
+                    color: #d8dee9;
+                    border: 1px solid #3b4252;
+                    border-radius: 4px;
+                    padding: 4px 6px;
+                    font-family: Consolas, 'Courier New', monospace;
+                    font-size: 11px;
+                    selection-background-color: #3b4252;
+                    selection-color: #88c0d0;
+                }
+                QPlainTextEdit:focus {
+                    border: 1px solid #88c0d0;
+                }
+                QScrollBar:vertical {
+                    background: #181a20;
+                    width: 10px;
+                    margin: 0px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #3b4252;
+                    min-height: 20px;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #4c566a;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+            """)
+
+            # Load initial content
+            init_val = self.node.widget_values.get("display") or self.node.widget_values.get("text") or ""
+            pte.setPlainText(str(init_val))
+
+            is_connected = self.node.inputs[0].has_connection if self.node.inputs else False
+            pte.setReadOnly(is_connected)
+
+            syncing = [False]
+
+            def on_panel_text():
+                if syncing[0]:
+                    return
+                if self.node.inputs and self.node.inputs[0].has_connection:
+                    return
+                syncing[0] = True
+                txt = pte.toPlainText()
+                self.node.widget_values["text"] = txt
+                self.node.widget_values["display"] = txt
+                self.node.dirty = True
+                if self.scene():
+                    self.scene().notify_graph_changed()
+                syncing[0] = False
+
+            def update_panel_ui(text_val: str):
+                if syncing[0]:
+                    return
+                syncing[0] = True
+                conn = self.node.inputs[0].has_connection if self.node.inputs else False
+                pte.setReadOnly(conn)
+                if pte.toPlainText() != text_val:
+                    sb = pte.verticalScrollBar()
+                    pos = sb.value() if sb else 0
+                    pte.setPlainText(text_val)
+                    if sb:
+                        sb.setValue(pos)
+                syncing[0] = False
+
+            self.node.on_display_updated = update_panel_ui
+            pte.textChanged.connect(on_panel_text)
+            layout.addWidget(pte)
+
         proxy.setWidget(container)
-        widget_y = self.height - 38.0
-        proxy.setPos(0, widget_y)
-        proxy.resize(self.width, 32.0)
+        if t == "PanelNode":
+            widget_y = self.HEADER_HEIGHT + self.ROW_HEIGHT + 6.0
+            widget_h = self.height - widget_y - 8.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, max(40.0, widget_h))
+        else:
+            widget_y = self.height - 38.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, 32.0)
 
 
     def boundingRect(self) -> QRectF:

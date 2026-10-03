@@ -186,6 +186,172 @@ class StringNode(NodeBase):
         self.set_output("Text", str(self.widget_values.get("value", "")))
 
 
+def format_panel_value(val: Any, max_items: int = 150) -> str:
+    """Format any data structure for display inside a Panel node."""
+    if val is None:
+        return "None"
+
+    # Point3D
+    if isinstance(val, Point3D):
+        return f"Point3D({val.x:.3f}, {val.y:.3f}, {val.z:.3f})"
+
+    # Vector3D
+    if isinstance(val, Vector3D):
+        return f"Vector3D({val.x:.3f}, {val.y:.3f}, {val.z:.3f})"
+
+    # MeshData
+    if isinstance(val, MeshData):
+        f_cnt = len(val.faces)
+        e_cnt = len(val.edges)
+        name_str = f" '{val.name}'" if val.name else ""
+        return f"MeshData{name_str} ({f_cnt} faces, {e_cnt} edges)"
+
+    # PolylineData
+    if isinstance(val, PolylineData):
+        closed_str = "closed" if val.closed else "open"
+        return f"Polyline ({len(val.points)} pts, {closed_str})"
+
+    # FaceData
+    if isinstance(val, FaceData):
+        return f"Face ({len(val.vertices)} vertices)"
+
+    # EdgeData
+    if isinstance(val, EdgeData):
+        return f"Edge ({val.start} -> {val.end})"
+
+    # Lists or tuples
+    if isinstance(val, (list, tuple)):
+        if len(val) == 0:
+            return "[Empty List]"
+
+        lines: List[str] = []
+        show_count = min(len(val), max_items)
+        for i in range(show_count):
+            item = val[i]
+            formatted_item = _format_single_item(item)
+            lines.append(f"[{i}] {formatted_item}")
+
+        if len(val) > max_items:
+            lines.append(f"... ({len(val) - max_items} more items, total {len(val)})")
+
+        return "\n".join(lines)
+
+    # Boolean
+    if isinstance(val, bool):
+        return str(val)
+
+    # Integer
+    if isinstance(val, int):
+        return str(val)
+
+    # Float
+    if isinstance(val, float):
+        formatted = f"{val:.4f}".rstrip("0").rstrip(".")
+        return formatted if formatted != "-0" else "0"
+
+    # String or other
+    return str(val)
+
+
+def _format_single_item(item: Any) -> str:
+    """Format an individual element within a list for compact panel display."""
+    if item is None:
+        return "None"
+    if isinstance(item, Point3D):
+        return f"Point3D({item.x:.2f}, {item.y:.2f}, {item.z:.2f})"
+    if isinstance(item, Vector3D):
+        return f"Vector3D({item.x:.2f}, {item.y:.2f}, {item.z:.2f})"
+    if isinstance(item, MeshData):
+        return f"Mesh ({len(item.faces)} faces, {len(item.edges)} edges)"
+    if isinstance(item, PolylineData):
+        return f"Polyline ({len(item.points)} pts)"
+    if isinstance(item, (list, tuple)):
+        return f"List ({len(item)} items)"
+    if isinstance(item, float):
+        formatted = f"{item:.4f}".rstrip("0").rstrip(".")
+        return formatted if formatted != "-0" else "0"
+    return str(item)
+
+
+def parse_panel_input(text: str) -> Any:
+    """Parse text entered into a disconnected Panel node."""
+    if not text or not text.strip():
+        return ""
+
+    raw_lines = [ln.strip() for ln in text.splitlines()]
+    non_empty = [ln for ln in raw_lines if ln]
+
+    if not non_empty:
+        return ""
+
+    parsed_items: List[Any] = []
+    for line in non_empty:
+        low = line.lower()
+        if low == "true":
+            parsed_items.append(True)
+        elif low == "false":
+            parsed_items.append(False)
+        else:
+            try:
+                parsed_items.append(int(line))
+                continue
+            except ValueError:
+                pass
+            try:
+                parsed_items.append(float(line))
+                continue
+            except ValueError:
+                pass
+            parsed_items.append(line)
+
+    if len(raw_lines) == 1 and "\n" not in text and "\r" not in text:
+        return parsed_items[0]
+    return parsed_items
+
+
+@register_node
+class PanelNode(NodeBase):
+    name = "Panel"
+    category = "Input"
+    description = "Inspect and view any data (numbers, points, lists, meshes) with indexed output, or enter multiline text and constants."
+    header_color = "#ebcb8b"
+
+    def __init__(self, node_id: Optional[str] = None):
+        self.on_display_updated: Optional[Any] = None
+        super().__init__(node_id)
+
+    def setup_ports(self) -> None:
+        self.add_input("Data", PortType.ANY, description="Incoming data to inspect/view")
+        self.add_output("Data", PortType.ANY, description="Pass-through data or entered text/numbers")
+        self.widget_values.setdefault("text", "")
+        self.widget_values.setdefault("display", "")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        self.error = None
+        data_port = self.inputs[0] if self.inputs else None
+
+        if data_port and data_port.has_connection:
+            src_val = self.get_input("Data")
+            self.set_output("Data", src_val)
+            display_str = format_panel_value(src_val)
+            self.widget_values["display"] = display_str
+            if self.on_display_updated:
+                try:
+                    self.on_display_updated(display_str)
+                except Exception:
+                    pass
+        else:
+            text = str(self.widget_values.get("text", ""))
+            parsed = parse_panel_input(text)
+            self.set_output("Data", parsed)
+            self.widget_values["display"] = text
+            if self.on_display_updated:
+                try:
+                    self.on_display_updated(text)
+                except Exception:
+                    pass
+
+
 # =====================================================================================
 # 2. MATH NODES
 # =====================================================================================

@@ -9,7 +9,7 @@ from PySide6.QtGui import (
     QBrush, QColor, QPainter, QPen, QTransform, QWheelEvent, QMouseEvent, QKeyEvent
 )
 from PySide6.QtWidgets import (
-    QGraphicsScene, QGraphicsView, QGraphicsItem
+    QGraphicsScene, QGraphicsView, QGraphicsItem, QGraphicsProxyWidget
 )
 
 from ..engine import NodeGraph, NodeBase, Connection, Port
@@ -209,11 +209,19 @@ class NodeGraphView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        item = self.itemAt(pos)
+        if isinstance(item, QGraphicsProxyWidget):
+            super().wheelEvent(event)
+            if event.isAccepted():
+                return
+
         zoom_factor = 1.15
         if event.angleDelta().y() > 0:
             self.scale(zoom_factor, zoom_factor)
         else:
             self.scale(1.0 / zoom_factor, 1.0 / zoom_factor)
+        event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
