@@ -2,6 +2,7 @@
 """Comprehensive catalog of parametric modeling nodes for IngeTrazo."""
 from __future__ import annotations
 
+import ast
 import math
 import copy
 from typing import List, Dict, Any, Optional, Union
@@ -19,6 +20,78 @@ NODE_REGISTRY: Dict[str, type] = {}
 def register_node(cls: type) -> type:
     NODE_REGISTRY[cls.__name__] = cls
     return cls
+
+
+# Safe evaluation environment for math expressions
+MATH_ENV: Dict[str, Any] = {
+    # Constants
+    "pi": math.pi,
+    "PI": math.pi,
+    "e": math.e,
+    "E": math.e,
+    "tau": math.tau,
+    "phi": (1.0 + math.sqrt(5.0)) / 2.0,
+    # Trigonometric functions
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "atan2": math.atan2,
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tanh": math.tanh,
+    # Powers, Roots, Exponentials
+    "sqrt": math.sqrt,
+    "cbrt": (lambda v: math.copysign(abs(v) ** (1.0 / 3.0), v)) if not hasattr(math, "cbrt") else math.cbrt,
+    "exp": math.exp,
+    "log": math.log,
+    "log10": math.log10,
+    "log2": math.log2,
+    "pow": pow,
+    # Rounding & Signs
+    "abs": abs,
+    "round": round,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "min": min,
+    "max": max,
+    # Geometric utilities
+    "hypot": math.hypot,
+    "deg": math.degrees,
+    "rad": math.radians,
+    "degrees": math.degrees,
+    "radians": math.radians,
+}
+
+_EXPR_CACHE: Dict[str, Any] = {}
+
+
+def _prepare_expression(expr_str: str) -> str:
+    """Normalize mathematical expression syntax for Python evaluation."""
+    s = expr_str.strip()
+    s = s.replace("^", "**")
+    return s
+
+
+def _safe_compile(expr_str: str):
+    """Compile an expression string safely after validating AST nodes."""
+    clean = _prepare_expression(expr_str)
+    if clean in _EXPR_CACHE:
+        return _EXPR_CACHE[clean]
+
+    tree = ast.parse(clean, mode="eval")
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Attribute)):
+            raise ValueError("Imports and attribute accesses are forbidden in expressions")
+        if isinstance(node, ast.Call) and not isinstance(node.func, ast.Name):
+            raise ValueError("Only direct math function calls are allowed")
+
+    code = compile(tree, "<expression>", "eval")
+    _EXPR_CACHE[clean] = code
+    return code
 
 
 # =====================================================================================
@@ -208,6 +281,123 @@ class RangeSeriesNode(NodeBase):
         count = max(1, int(self.get_input("Count", 10)))
         series = [start + i * step for i in range(count)]
         self.set_output("List", series)
+
+
+@register_node
+class ExpressionNode(NodeBase):
+    name = "Expression"
+    category = "Math"
+    description = "Evaluate mathematical expressions (e.g. sin(x)*cos(y), x^2 + y^2, sqrt(x*x + y*y)). Supports lists, broadcasting, and trigonometry."
+    header_color = "#b48ead"
+
+    def setup_ports(self) -> None:
+        self.add_input("x", PortType.ANY, 1.0, "Input variable x (or u, a)")
+        self.add_input("y", PortType.ANY, 1.0, "Input variable y (or v, b)")
+        self.add_input("z", PortType.ANY, 0.0, "Input variable z (or w, c)")
+        self.add_input("Expr", PortType.STRING, "", "Formula override wire")
+        self.add_output("Result", PortType.ANY, "Evaluated result (number or list)")
+        self.widget_values.setdefault("expr", "x + y")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        self.error = None
+        # Wire input overrides on-node widget if provided and non-empty
+        wire_expr = self.get_input("Expr", "")
+        if wire_expr and str(wire_expr).strip():
+            expr_str = str(wire_expr).strip()
+        else:
+            expr_str = str(self.widget_values.get("expr", "x + y")).strip()
+
+        if not expr_str:
+            self.set_output("Result", 0.0)
+            return
+
+        try:
+            code = _safe_compile(expr_str)
+        except Exception as ex:
+            self.error = f"Expression syntax error: {ex}"
+            self.set_output("Result", 0.0)
+            return
+
+        x_raw = self.get_input("x", 1.0)
+        y_raw = self.get_input("y", 1.0)
+        z_raw = self.get_input("z", 0.0)
+
+        # Check if any input is a list/tuple
+        is_x_list = isinstance(x_raw, (list, tuple))
+        is_y_list = isinstance(y_raw, (list, tuple))
+        is_z_list = isinstance(z_raw, (list, tuple))
+
+        has_list = is_x_list or is_y_list or is_z_list
+
+        if has_list:
+            len_x = len(x_raw) if is_x_list else 1
+            len_y = len(y_raw) if is_y_list else 1
+            len_z = len(z_raw) if is_z_list else 1
+            n_items = max(len_x, len_y, len_z)
+
+            results: List[float] = []
+            for i in range(n_items):
+                try:
+                    val_x = float(x_raw[i % len_x]) if is_x_list else float(x_raw)
+                except Exception:
+                    val_x = 0.0
+                try:
+                    val_y = float(y_raw[i % len_y]) if is_y_list else float(y_raw)
+                except Exception:
+                    val_y = 0.0
+                try:
+                    val_z = float(z_raw[i % len_z]) if is_z_list else float(z_raw)
+                except Exception:
+                    val_z = 0.0
+
+                scope = dict(MATH_ENV)
+                scope.update({
+                    "x": val_x, "y": val_y, "z": val_z,
+                    "X": val_x, "Y": val_y, "Z": val_z,
+                    "u": val_x, "v": val_y, "w": val_z,
+                    "U": val_x, "V": val_y, "W": val_z,
+                    "a": val_x, "b": val_y, "c": val_z,
+                    "A": val_x, "B": val_y, "C": val_z,
+                    "i": float(i),
+                })
+                try:
+                    res = eval(code, {"__builtins__": {}}, scope)
+                    results.append(float(res))
+                except Exception as ex:
+                    self.error = f"Eval error at [{i}]: {ex}"
+                    results.append(0.0)
+
+            self.set_output("Result", results)
+        else:
+            try:
+                val_x = float(x_raw)
+            except Exception:
+                val_x = 0.0
+            try:
+                val_y = float(y_raw)
+            except Exception:
+                val_y = 0.0
+            try:
+                val_z = float(z_raw)
+            except Exception:
+                val_z = 0.0
+
+            scope = dict(MATH_ENV)
+            scope.update({
+                "x": val_x, "y": val_y, "z": val_z,
+                "X": val_x, "Y": val_y, "Z": val_z,
+                "u": val_x, "v": val_y, "w": val_z,
+                "U": val_x, "V": val_y, "W": val_z,
+                "a": val_x, "b": val_y, "c": val_z,
+                "A": val_x, "B": val_y, "C": val_z,
+                "i": 0.0,
+            })
+            try:
+                res = eval(code, {"__builtins__": {}}, scope)
+                self.set_output("Result", float(res))
+            except Exception as ex:
+                self.error = f"Eval error: {ex}"
+                self.set_output("Result", 0.0)
 
 
 # =====================================================================================
@@ -712,6 +902,128 @@ class FaceFromPointsNode(NodeBase):
         if len(pts) >= 3:
             face = FaceData(vertices=pts)
             self.set_output("Mesh", MeshData(faces=[face]))
+
+
+@register_node
+class MeshFromPointsNode(NodeBase):
+    name = "Mesh from Points"
+    category = "Solids"
+    description = "Create a 3D quad or triangulated mesh surface from a structured grid of points with U and V counts."
+    header_color = "#d08770"
+
+    def setup_ports(self) -> None:
+        self.add_input("Points", PortType.ANY, description="Grid points (List of Point3D or PolylineData)")
+        self.add_input("U", PortType.INTEGER, 10, "Points count along U direction (must be >= 2)")
+        self.add_input("V", PortType.INTEGER, 0, "Points count along V direction (0 for auto: total / U)")
+        self.add_input("Closed U", PortType.BOOLEAN, False, "Wrap mesh in U direction (tube / cylinder)")
+        self.add_input("Closed V", PortType.BOOLEAN, False, "Wrap mesh in V direction (torus)")
+        self.add_input("Swap UV", PortType.BOOLEAN, False, "Transpose grid order (row-major vs column-major)")
+        self.add_input("Triangulate", PortType.BOOLEAN, False, "Split quads into triangles (guarantees planar faces)")
+        self.add_output("Mesh", PortType.MESH, "Generated 3D mesh surface")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        self.error = None
+        pts_raw = self.get_input("Points")
+        if not pts_raw:
+            self.set_output("Mesh", MeshData())
+            return
+
+        # Extract 1D list of Point3D
+        pts: List[Point3D] = []
+        u_override: Optional[int] = None
+        v_override: Optional[int] = None
+
+        if isinstance(pts_raw, PolylineData):
+            pts = list(pts_raw.points)
+        elif isinstance(pts_raw, (list, tuple)):
+            if len(pts_raw) > 0 and isinstance(pts_raw[0], (list, tuple)):
+                # 2D list of points: row-by-row
+                u_override = len(pts_raw)
+                v_override = len(pts_raw[0])
+                for row in pts_raw:
+                    for p in row:
+                        if isinstance(p, Point3D):
+                            pts.append(p)
+                        elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                            pts.append(Point3D(float(p[0]), float(p[1]), float(p[2])))
+            else:
+                for p in pts_raw:
+                    if isinstance(p, Point3D):
+                        pts.append(p)
+                    elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                        pts.append(Point3D(float(p[0]), float(p[1]), float(p[2])))
+
+        total = len(pts)
+        if total < 4:
+            self.error = f"At least 4 points required to form a mesh surface (got {total})"
+            self.set_output("Mesh", MeshData())
+            return
+
+        u_count = u_override if u_override is not None else max(2, int(self.get_input("U", 10)))
+        v_count = v_override if v_override is not None else int(self.get_input("V", 0))
+
+        if v_count <= 0:
+            v_count = max(2, total // u_count)
+
+        if total < u_count * v_count:
+            self.error = f"Point count ({total}) is less than U ({u_count}) * V ({v_count}) = {u_count * v_count}"
+            self.set_output("Mesh", MeshData())
+            return
+
+        closed_u = bool(self.get_input("Closed U", False))
+        closed_v = bool(self.get_input("Closed V", False))
+        swap_uv = bool(self.get_input("Swap UV", False))
+        triangulate = bool(self.get_input("Triangulate", False))
+
+        def get_pt(u_idx: int, v_idx: int) -> Point3D:
+            if swap_uv:
+                idx = v_idx * u_count + u_idx
+            else:
+                idx = u_idx * v_count + v_idx
+            return pts[idx]
+
+        faces: List[FaceData] = []
+        edges: List[EdgeData] = []
+        seen_edges = set()
+
+        def add_edge(p_a: Point3D, p_b: Point3D, soft: bool = False) -> None:
+            k1 = (round(p_a.x, 4), round(p_a.y, 4), round(p_a.z, 4))
+            k2 = (round(p_b.x, 4), round(p_b.y, 4), round(p_b.z, 4))
+            ek = (min(k1, k2), max(k1, k2))
+            if ek not in seen_edges:
+                seen_edges.add(ek)
+                edges.append(EdgeData(p_a, p_b, soft=soft))
+
+        u_cells = u_count if closed_u else u_count - 1
+        v_cells = v_count if closed_v else v_count - 1
+
+        for u in range(u_cells):
+            u_next = (u + 1) % u_count
+            for v in range(v_cells):
+                v_next = (v + 1) % v_count
+
+                p00 = get_pt(u, v)
+                p10 = get_pt(u_next, v)
+                p11 = get_pt(u_next, v_next)
+                p01 = get_pt(u, v_next)
+
+                if triangulate:
+                    faces.append(FaceData(vertices=[p00, p10, p11]))
+                    faces.append(FaceData(vertices=[p00, p11, p01]))
+                    add_edge(p00, p10)
+                    add_edge(p10, p11)
+                    add_edge(p11, p00, soft=True)
+                    add_edge(p11, p01)
+                    add_edge(p01, p00)
+                else:
+                    faces.append(FaceData(vertices=[p00, p10, p11, p01]))
+                    add_edge(p00, p10)
+                    add_edge(p10, p11)
+                    add_edge(p11, p01)
+                    add_edge(p01, p00)
+
+        mesh = MeshData(faces=faces, edges=edges, name="MeshFromPoints")
+        self.set_output("Mesh", mesh)
 
 
 # =====================================================================================

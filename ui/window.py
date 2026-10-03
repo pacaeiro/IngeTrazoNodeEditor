@@ -118,6 +118,7 @@ class NodeEditorWidget(QWidget):
         self.combo_presets.addItem("2. Gable Roof House")
         self.combo_presets.addItem("3. Spiral Staircase")
         self.combo_presets.addItem("4. Column Grid Array")
+        self.combo_presets.addItem("5. Parametric Wave Surface")
         self.combo_presets.currentIndexChanged.connect(self.on_preset_selected)
         toolbar.addWidget(self.combo_presets)
 
@@ -303,6 +304,8 @@ class NodeEditorWidget(QWidget):
             self.build_example_spiral_staircase()
         elif index == 4:
             self.build_example_column_grid()
+        elif index == 5:
+            self.build_example_wave_surface()
 
     def build_example_box(self) -> None:
         self.clear_graph()
@@ -411,6 +414,56 @@ class NodeEditorWidget(QWidget):
         self.graph.connect(r.outputs[0], cyl.inputs[1])
         self.graph.connect(h.outputs[0], cyl.inputs[2])
         self.graph.connect(cyl.outputs[0], out.inputs[0])
+
+        self.scene.sync_from_graph()
+        self.run_evaluation()
+
+    def build_example_wave_surface(self) -> None:
+        self.clear_graph()
+        from ..nodes_library import (
+            GridPointsNode, DeconstructPointNode, ExpressionNode,
+            ConstructPointNode, MeshFromPointsNode, IngeTrazoOutputNode
+        )
+
+        grid = self.graph.add_node(GridPointsNode())
+        grid.x, grid.y = -620, 50
+        grid.inputs[0].default_value = 16  # Count X
+        grid.inputs[1].default_value = 16  # Count Y
+        grid.inputs[2].default_value = 0.5 # Step X
+        grid.inputs[3].default_value = 0.5 # Step Y
+
+        decon = self.graph.add_node(DeconstructPointNode())
+        decon.x, decon.y = -360, 50
+
+        expr = self.graph.add_node(ExpressionNode())
+        expr.x, expr.y = -100, 70
+        expr.widget_values["expr"] = "sin(x * 0.8) * cos(y * 0.8) * 1.5"
+
+        con = self.graph.add_node(ConstructPointNode())
+        con.x, con.y = 180, 50
+
+        mesh_pts = self.graph.add_node(MeshFromPointsNode())
+        mesh_pts.x, mesh_pts.y = 440, 50
+        mesh_pts.inputs[1].default_value = 16 # U = 16
+
+        out = self.graph.add_node(IngeTrazoOutputNode())
+        out.x, out.y = 700, 50
+        out.inputs[1].default_value = "ParametricWave"
+
+        # Connections:
+        # 1. Grid Points -> Deconstruct Point
+        self.graph.connect(grid.outputs[0], decon.inputs[0])
+        # 2. Deconstruct X -> Expr x, Deconstruct Y -> Expr y
+        self.graph.connect(decon.outputs[0], expr.inputs[0])
+        self.graph.connect(decon.outputs[1], expr.inputs[1])
+        # 3. Construct Point: X from decon, Y from decon, Z from expr result!
+        self.graph.connect(decon.outputs[0], con.inputs[0])
+        self.graph.connect(decon.outputs[1], con.inputs[1])
+        self.graph.connect(expr.outputs[0], con.inputs[2])
+        # 4. Construct Point -> Mesh from Points
+        self.graph.connect(con.outputs[0], mesh_pts.inputs[0])
+        # 5. Mesh from Points -> IngeTrazo Output
+        self.graph.connect(mesh_pts.outputs[0], out.inputs[0])
 
         self.scene.sync_from_graph()
         self.run_evaluation()

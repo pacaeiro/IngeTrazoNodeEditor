@@ -98,7 +98,7 @@ class NodeItem(QGraphicsObject):
         has_widget = self.has_custom_widget()
         if has_widget:
             content_height += 44.0
-            self.width = max(self.width, 210.0)
+            self.width = max(self.width, 220.0 if self.node.__class__.__name__ == "ExpressionNode" else 210.0)
 
         self.height = self.HEADER_HEIGHT + content_height + 10.0
 
@@ -124,7 +124,7 @@ class NodeItem(QGraphicsObject):
 
     def has_custom_widget(self) -> bool:
         t = self.node.__class__.__name__
-        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode")
+        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode")
 
     def add_embedded_widget(self) -> None:
         t = self.node.__class__.__name__
@@ -309,6 +309,39 @@ class NodeItem(QGraphicsObject):
                     self.scene().notify_graph_changed()
 
             le.textChanged.connect(on_text)
+            layout.addWidget(le)
+
+        elif t == "ExpressionNode":
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(8, 0, 8, 0)
+            layout.setSpacing(4)
+            cur_expr = str(self.node.widget_values.get("expr", "x + y"))
+            le = QLineEdit(cur_expr)
+            le.setPlaceholderText("e.g. sin(x)*cos(y)")
+            le.setStyleSheet("""
+                QLineEdit {
+                    background: #181a20;
+                    color: #56b6c2;
+                    border: 1px solid #434c5e;
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-family: Consolas, 'Courier New', monospace;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #88c0d0;
+                    background: #1e222b;
+                }
+            """)
+
+            def on_expr_changed(txt):
+                self.node.widget_values["expr"] = txt
+                self.node.dirty = True
+                if self.scene():
+                    self.scene().notify_graph_changed()
+
+            le.textChanged.connect(on_expr_changed)
             layout.addWidget(le)
 
         proxy.setWidget(container)

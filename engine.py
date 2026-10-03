@@ -54,10 +54,28 @@ class Port:
         self.name = name
         self.port_type = port_type
         self.is_input = is_input
-        self.default_value = default_value
-        self.value: Any = default_value
+        self._default_value = default_value
+        self._value: Any = default_value
         self.description = description
         self.connections: List[Connection] = []
+
+    @property
+    def default_value(self) -> Any:
+        return self._default_value
+
+    @default_value.setter
+    def default_value(self, val: Any) -> None:
+        if self._value == self._default_value or self._value is None:
+            self._value = val
+        self._default_value = val
+
+    @property
+    def value(self) -> Any:
+        return self._value
+
+    @value.setter
+    def value(self, val: Any) -> None:
+        self._value = val
 
     @property
     def has_connection(self) -> bool:
@@ -149,6 +167,9 @@ class NodeBase:
         # If disconnected, check widget value matching port name
         if port.name in self.widget_values:
             return self.widget_values[port.name]
+
+        if port.value is not None:
+            return port.value
 
         return port.default_value if port.default_value is not None else fallback
 

@@ -37,16 +37,16 @@ A visual parametric node editor extension for **[IngeTrazo](https://github.com/i
   - Dragging sliders on the canvas live-streams parametric geometry directly into IngeTrazo's 3D viewport.
 - **Parametric Node Catalog:**
   - **Inputs:** Number Slider (live float/int), Value Box, Toggle Switch, Vector XYZ, Text String.
-  - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator.
+  - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator, **Expression Node** (safe AST evaluator supporting formulas like `sin(x)*cos(y)`, `sqrt(x*x + y*y)`, variable aliases `x/y/z`, `u/v/w`, `a/b/c`, list broadcasting, and on-node code widget).
   - **Points & Vectors:** Construct Point (supports list inputs), Deconstruct Point, Vector Math, Distance, 2D Grid Array.
   - **2D Profiles:** Line, Rectangle, Circle/Polygon, Polyline.
-  - **3D Solids:** Box (Cuboid), Cylinder, UV Sphere, Extrude Profile, Face from Points.
+  - **3D Solids:** Box (Cuboid), Cylinder, UV Sphere, Extrude Profile, Face from Points, **Mesh from Points** (generates quad and triangulated 3D mesh surfaces from structured point grids with U and V counts, periodic wrapping, and UV transposition).
   - **Transforms:** Move / Translate, Rotate Z, Scale, Merge Meshes.
   - **Scene Output:** `IngeTrazo Output` node with Live Sync toggle and Bake button.
 - **Bake to IngeTrazo:**
   - Commits geometry into IngeTrazo native `Group` containers and layers (`shapes`, etc.) with full Ctrl+Z undo/redo support (`SnapshotImport`).
 - **Presets & Serialization:**
-  - Built-in presets: *Parametric Box*, *Gable Roof House*, *Spiral Staircase*, *Column Grid Array*.
+  - Built-in presets: *Parametric Box*, *Gable Roof House*, *Spiral Staircase*, *Column Grid Array*, *Parametric Wave Surface*.
   - Save and load node graphs as `.itgraph` (JSON).
 
 ---
