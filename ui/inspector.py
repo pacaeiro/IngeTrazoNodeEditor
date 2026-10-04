@@ -320,7 +320,11 @@ class NodeInspectorPanel(QWidget):
 
     def _build_parameters_section(self, node: NodeBase) -> None:
         t_name = node.__class__.__name__
-        has_params = (t_name in ("NumberSliderNode", "IntegerSliderNode", "ExpressionNode", "ToggleNode", "StringNode", "PanelNode", "ReferenceFaceNode"))
+        has_params = (t_name in (
+            "NumberSliderNode", "IntegerSliderNode", "ExpressionNode",
+            "ToggleNode", "StringNode", "PanelNode", "ReferenceFaceNode",
+            "ImageFileNode", "ImagePreviewNode", "ImageSamplerNode"
+        ))
 
         if not has_params:
             return
@@ -665,6 +669,132 @@ class NodeInspectorPanel(QWidget):
             p_lay.addWidget(lbl_info)
             p_lay.addWidget(btn_set)
             p_lay.addWidget(btn_clear)
+            lay.addWidget(p_box)
+
+        elif t_name in ("ImageFileNode", "ImagePreviewNode", "ImageSamplerNode"):
+            p_box = QWidget()
+            p_lay = QVBoxLayout(p_box)
+            p_lay.setContentsMargins(0, 0, 0, 0)
+            p_lay.setSpacing(6)
+
+            # Image Path Field
+            p_lay.addWidget(QLabel("Image File:"))
+            row_f = QHBoxLayout()
+            row_f.setSpacing(4)
+            le_path = QLineEdit(str(node.widget_values.get("image_path", "")))
+            le_path.setPlaceholderText("Select image file...")
+
+            btn_browse = QPushButton("Browse...")
+            btn_browse.setCursor(Qt.PointingHandCursor)
+
+            row_f.addWidget(le_path, 1)
+            row_f.addWidget(btn_browse, 0)
+            p_lay.addLayout(row_f)
+
+            # Thumbnail preview box
+            lbl_preview = QLabel()
+            lbl_preview.setFixedSize(200, 120)
+            lbl_preview.setAlignment(Qt.AlignCenter)
+            lbl_preview.setStyleSheet("background: #181a20; border: 1px solid #3b4252; border-radius: 4px; color: #4c566a; font-size: 11px;")
+
+            def refresh_insp_preview():
+                import os
+                from PySide6.QtGui import QImage, QPixmap
+                qimg = node.widget_values.get("_cached_qimage")
+                p = node.widget_values.get("image_path", "")
+                if not qimg and p and os.path.exists(p):
+                    qimg = QImage(p)
+                if qimg and not qimg.isNull():
+                    pix = QPixmap.fromImage(qimg).scaled(lbl_preview.width() - 4, lbl_preview.height() - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    lbl_preview.setPixmap(pix)
+                    lbl_preview.setText("")
+                else:
+                    lbl_preview.setPixmap(QPixmap())
+                    lbl_preview.setText("No Image Loaded")
+
+            refresh_insp_preview()
+
+            def on_browse_click():
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getOpenFileName(
+                    None, "Select Image", "",
+                    "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif);;All Files (*.*)"
+                )
+                if path:
+                    le_path.setText(path)
+                    node.widget_values["image_path"] = path
+                    refresh_insp_preview()
+                    node.dirty = True
+                    if self.current_scene:
+                        self.current_scene.notify_graph_changed()
+                    if self.current_node_item and hasattr(self.current_node_item, "update"):
+                        self.current_node_item.update()
+
+            def on_path_text_change(txt):
+                if not self._syncing:
+                    node.widget_values["image_path"] = txt.strip()
+                    refresh_insp_preview()
+                    node.dirty = True
+                    if self.current_scene:
+                        self.current_scene.notify_graph_changed()
+
+            btn_browse.clicked.connect(on_browse_click)
+            le_path.textChanged.connect(on_path_text_change)
+
+            # Specific controls for ImageSamplerNode
+            if t_name == "ImageSamplerNode":
+                chk_inv = QCheckBox("Invert Brightness / Heights")
+                chk_inv.setChecked(bool(node.widget_values.get("invert", False)))
+
+                def on_inv_toggled(chk):
+                    node.widget_values["invert"] = chk
+                    node.dirty = True
+                    if self.current_scene:
+                        self.current_scene.notify_graph_changed()
+                    if self.current_node_item and hasattr(self.current_node_item, "update"):
+                        self.current_node_item.update()
+
+                chk_inv.toggled.connect(on_inv_toggled)
+                p_lay.addWidget(chk_inv)
+
+                # Channel selection
+                p_lay.addWidget(QLabel("Color Channel:"))
+                cb_chan = QComboBox()
+                cb_chan.addItems(["Grayscale", "Red", "Green", "Blue", "Alpha"])
+                cur_ch = node.widget_values.get("channel", "Grayscale")
+                idx_ch = cb_chan.findText(cur_ch)
+                if idx_ch >= 0:
+                    cb_chan.setCurrentIndex(idx_ch)
+
+                def on_ch_changed(idx):
+                    node.widget_values["channel"] = cb_chan.currentText()
+                    node.dirty = True
+                    if self.current_scene:
+                        self.current_scene.notify_graph_changed()
+
+                cb_chan.currentIndexChanged.connect(on_ch_changed)
+                p_lay.addWidget(cb_chan)
+
+                # Sampling filter
+                p_lay.addWidget(QLabel("Filter Mode:"))
+                cb_flt = QComboBox()
+                cb_flt.addItems(["Bilinear", "Nearest"])
+                cur_flt = node.widget_values.get("filter", "Bilinear")
+                idx_flt = cb_flt.findText(cur_flt)
+                if idx_flt >= 0:
+                    cb_flt.setCurrentIndex(idx_flt)
+
+                def on_flt_changed(idx):
+                    node.widget_values["filter"] = cb_flt.currentText()
+                    node.dirty = True
+                    if self.current_scene:
+                        self.current_scene.notify_graph_changed()
+
+                cb_flt.currentIndexChanged.connect(on_flt_changed)
+                p_lay.addWidget(cb_flt)
+
+            p_lay.addWidget(QLabel("Preview:"))
+            p_lay.addWidget(lbl_preview)
             lay.addWidget(p_box)
 
         sep = QFrame()

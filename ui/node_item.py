@@ -109,6 +109,15 @@ class NodeItem(QGraphicsObject):
             elif t_name == "ReferenceFaceNode":
                 content_height += 62.0
                 self.width = max(self.width, 210.0)
+            elif t_name == "ImageFileNode":
+                content_height += 64.0
+                self.width = max(self.width, 210.0)
+            elif t_name == "ImagePreviewNode":
+                content_height += 106.0
+                self.width = max(self.width, 210.0)
+            elif t_name == "ImageSamplerNode":
+                content_height += 136.0
+                self.width = max(self.width, 210.0)
             else:
                 content_height += 44.0
                 self.width = max(self.width, 220.0 if t_name == "ExpressionNode" else 210.0)
@@ -137,7 +146,11 @@ class NodeItem(QGraphicsObject):
 
     def has_custom_widget(self) -> bool:
         t = self.node.__class__.__name__
-        return t in ("NumberSliderNode", "IntegerSliderNode", "ToggleNode", "StringNode", "ExpressionNode", "PanelNode", "ReferenceFaceNode")
+        return t in (
+            "NumberSliderNode", "IntegerSliderNode", "ToggleNode",
+            "StringNode", "ExpressionNode", "PanelNode", "ReferenceFaceNode",
+            "ImageFileNode", "ImagePreviewNode", "ImageSamplerNode"
+        )
 
     def add_embedded_widget(self) -> None:
         t = self.node.__class__.__name__
@@ -506,6 +519,117 @@ class NodeItem(QGraphicsObject):
             layout.addWidget(btn)
             layout.addWidget(lbl_status)
 
+        elif t == "ImageFileNode":
+            btn = QPushButton("📂 Open Image...")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #434c5e; color: #eceff4; border: 1px solid #4c566a;
+                    border-radius: 4px; padding: 4px 6px; font-size: 11px; font-weight: bold;
+                }
+                QPushButton:hover { background: #4c566a; border-color: #88c0d0; color: #88c0d0; }
+                QPushButton:pressed { background: #2e3440; }
+            """)
+            saved_p = self.node.widget_values.get("image_path", "")
+            import os
+            init_txt = os.path.basename(saved_p) if saved_p else "No file selected"
+            lbl_status = QLabel(init_txt)
+            lbl_status.setAlignment(Qt.AlignCenter)
+            lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;" if saved_p else "color: #d8dee9; font-size: 10px; font-style: italic;")
+
+            def on_browse_file():
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getOpenFileName(
+                    None, "Select Image File", "",
+                    "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif);;All Files (*.*)"
+                )
+                if path:
+                    self.node.widget_values["image_path"] = path
+                    lbl_status.setText(os.path.basename(path))
+                    lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;")
+                    self.node.dirty = True
+                    if self.scene():
+                        self.scene().notify_graph_changed()
+
+            btn.clicked.connect(on_browse_file)
+            layout.addWidget(btn)
+            layout.addWidget(lbl_status)
+
+        elif t in ("ImagePreviewNode", "ImageSamplerNode"):
+            if t == "ImageSamplerNode":
+                row_btns = QHBoxLayout()
+                row_btns.setSpacing(4)
+                btn_open = QPushButton("📂 Open...")
+                btn_open.setCursor(Qt.PointingHandCursor)
+                btn_open.setStyleSheet("""
+                    QPushButton {
+                        background: #434c5e; color: #eceff4; border: 1px solid #4c566a;
+                        border-radius: 4px; padding: 3px 6px; font-size: 10px; font-weight: bold;
+                    }
+                    QPushButton:hover { background: #4c566a; border-color: #88c0d0; color: #88c0d0; }
+                """)
+                btn_inv = QPushButton("⇅ Invert")
+                btn_inv.setCursor(Qt.PointingHandCursor)
+                btn_inv.setCheckable(True)
+                btn_inv.setChecked(bool(self.node.widget_values.get("invert", False)))
+                btn_inv.setStyleSheet("""
+                    QPushButton {
+                        background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
+                        border-radius: 4px; padding: 3px 6px; font-size: 10px;
+                    }
+                    QPushButton:checked { background: #88c0d0; color: #1e222b; font-weight: bold; }
+                    QPushButton:hover { border-color: #88c0d0; }
+                """)
+                row_btns.addWidget(btn_open, 1)
+                row_btns.addWidget(btn_inv, 1)
+                layout.addLayout(row_btns)
+
+            lbl_pix = QLabel()
+            lbl_pix.setAlignment(Qt.AlignCenter)
+            lbl_pix.setFixedSize(int(self.width - 24), 78)
+            lbl_pix.setStyleSheet("background: #181a20; border: 1px solid #3b4252; border-radius: 4px; color: #4c566a; font-size: 10px;")
+
+            def update_preview_pix():
+                import os
+                from PySide6.QtGui import QImage, QPixmap
+                qimg = self.node.widget_values.get("_cached_qimage")
+                p = self.node.widget_values.get("image_path", "")
+                if not qimg and p and os.path.exists(p):
+                    qimg = QImage(p)
+                if qimg and not qimg.isNull():
+                    pix = QPixmap.fromImage(qimg).scaled(lbl_pix.width() - 4, lbl_pix.height() - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    lbl_pix.setPixmap(pix)
+                    lbl_pix.setText("")
+                else:
+                    lbl_pix.setPixmap(QPixmap())
+                    lbl_pix.setText("No Image Loaded")
+
+            update_preview_pix()
+            layout.addWidget(lbl_pix)
+
+            if t == "ImageSamplerNode":
+                def on_sampler_browse():
+                    from PySide6.QtWidgets import QFileDialog
+                    path, _ = QFileDialog.getOpenFileName(
+                        None, "Select Image", "",
+                        "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif);;All Files (*.*)"
+                    )
+                    if path:
+                        self.node.widget_values["image_path"] = path
+                        update_preview_pix()
+                        self.node.dirty = True
+                        if self.scene():
+                            self.scene().notify_graph_changed()
+
+                def on_sampler_inv():
+                    self.node.widget_values["invert"] = btn_inv.isChecked()
+                    self.node.dirty = True
+                    if self.scene():
+                        self.scene().notify_graph_changed()
+
+                btn_open.clicked.connect(on_sampler_browse)
+                btn_inv.clicked.connect(on_sampler_inv)
+
         self.widget_proxy = proxy
         proxy.setWidget(container)
         if t == "PanelNode":
@@ -517,6 +641,18 @@ class NodeItem(QGraphicsObject):
             widget_y = self.height - 58.0
             proxy.setPos(0, widget_y)
             proxy.resize(self.width, 52.0)
+        elif t == "ImageFileNode":
+            widget_y = self.height - 58.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, 52.0)
+        elif t == "ImagePreviewNode":
+            widget_y = self.height - 98.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, 90.0)
+        elif t == "ImageSamplerNode":
+            widget_y = self.height - 128.0
+            proxy.setPos(0, widget_y)
+            proxy.resize(self.width, 120.0)
         else:
             widget_y = self.height - 38.0
             proxy.setPos(0, widget_y)

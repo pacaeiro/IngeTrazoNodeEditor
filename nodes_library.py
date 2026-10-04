@@ -2741,3 +2741,378 @@ class ReferenceFaceNode(NodeBase):
         self.set_output("Outer", outer_poly)
         self.set_output("Holes", holes_poly)
 
+
+# -----------------------------------------------------------------------------
+# Image Nodes (Image File, Image Preview, Image Sampler, Mesh From Points)
+# -----------------------------------------------------------------------------
+
+def _sample_image_data(
+    image_path: str = "",
+    qimg_override: Any = None,
+    domain_u: float = 10.0,
+    domain_v: float = 10.0,
+    min_h: float = 0.0,
+    max_h: float = 2.0,
+    count_u: int = 80,
+    count_v: int = 80,
+    invert: bool = False,
+    channel: str = "Grayscale",
+    filter_mode: str = "Bilinear"
+):
+    import os
+    try:
+        from PySide6.QtGui import QImage, QColor
+    except ImportError:
+        QImage = None
+        QColor = None
+
+    count_u = max(2, min(1000, int(count_u)))
+    count_v = max(2, min(1000, int(count_v)))
+
+    if QImage is None:
+        # Fallback if Qt is not installed in the current environment
+        size_x = float(domain_u)
+        size_y = float(domain_v)
+        pts_fallback: List[Point3D] = []
+        vals_fallback: List[float] = []
+        cols_fallback: List[Tuple[float, float, float]] = []
+        for j in range(count_v):
+            v = j / float(count_v - 1)
+            y = v * size_y
+            for i in range(count_u):
+                u = i / float(count_u - 1)
+                x = u * size_x
+                nx = u * 2.0 - 1.0
+                ny = v * 2.0 - 1.0
+                r = math.sqrt(nx * nx + ny * ny) * math.pi * 3.0
+                bright = math.sin(r) * 0.5 + 0.5
+                if invert:
+                    bright = 1.0 - bright
+                z = min_h + bright * (max_h - min_h)
+                pts_fallback.append(Point3D(x, y, z))
+                vals_fallback.append(bright)
+                cols_fallback.append((bright, bright, bright))
+        faces_fallback: List[FaceData] = []
+        for j in range(count_v - 1):
+            for i in range(count_u - 1):
+                idx00 = j * count_u + i
+                idx10 = j * count_u + (i + 1)
+                idx11 = (j + 1) * count_u + (i + 1)
+                idx01 = (j + 1) * count_u + i
+                faces_fallback.append(FaceData(vertices=[pts_fallback[idx00], pts_fallback[idx10], pts_fallback[idx11], pts_fallback[idx01]], color=cols_fallback[idx00]))
+        mesh_fallback = MeshData(faces=faces_fallback, name="DisplacementMesh")
+        return pts_fallback, vals_fallback, cols_fallback, mesh_fallback, 128, 128, None
+
+    qimg = None
+    if qimg_override and hasattr(qimg_override, "pixelColor") and not qimg_override.isNull():
+        qimg = qimg_override
+    elif image_path and isinstance(image_path, str) and os.path.exists(image_path):
+        qimg = QImage(image_path)
+
+    if not qimg or qimg.isNull():
+        # Procedural default test ripple if no image is loaded yet
+        w, h = 128, 128
+        qimg = QImage(w, h, QImage.Format_RGB32)
+        for y in range(h):
+            for x in range(w):
+                nx = (x - w / 2.0) / (w / 2.0)
+                ny = (y - h / 2.0) / (h / 2.0)
+                r = math.sqrt(nx * nx + ny * ny) * math.pi * 3.0
+                val = int(max(0, min(255, (math.sin(r) * 0.5 + 0.5) * 255)))
+                qimg.setPixelColor(x, y, QColor(val, val, val))
+
+    img_w = qimg.width()
+    img_h = qimg.height()
+
+    size_x = float(domain_u)
+    size_y = float(domain_v)
+    if abs(size_y - size_x) < 1e-4 and img_w > 0:
+        size_y = size_x * (float(img_h) / float(img_w))
+
+    points: List[Point3D] = []
+    values: List[float] = []
+    colors: List[Tuple[float, float, float]] = []
+
+    for j in range(count_v):
+        v = j / float(count_v - 1)
+        y = v * size_y
+        py = (1.0 - v) * (img_h - 1)  # bottom-to-top 3D alignment
+
+        for i in range(count_u):
+            u = i / float(count_u - 1)
+            x = u * size_x
+            px = u * (img_w - 1)
+
+            if filter_mode == "Nearest" or img_w <= 1 or img_h <= 1:
+                col = qimg.pixelColor(int(round(px)), int(round(py)))
+                rf, gf, bf, af = col.redF(), col.greenF(), col.blueF(), col.alphaF()
+            else:
+                x0 = int(px)
+                y0 = int(py)
+                x1 = min(x0 + 1, img_w - 1)
+                y1 = min(y0 + 1, img_h - 1)
+                fx = px - x0
+                fy = py - y0
+                c00 = qimg.pixelColor(x0, y0)
+                c10 = qimg.pixelColor(x1, y0)
+                c01 = qimg.pixelColor(x0, y1)
+                c11 = qimg.pixelColor(x1, y1)
+
+                rf = (1 - fx) * (1 - fy) * c00.redF() + fx * (1 - fy) * c10.redF() + (1 - fx) * fy * c01.redF() + fx * fy * c11.redF()
+                gf = (1 - fx) * (1 - fy) * c00.greenF() + fx * (1 - fy) * c10.greenF() + (1 - fx) * fy * c01.greenF() + fx * fy * c11.greenF()
+                bf = (1 - fx) * (1 - fy) * c00.blueF() + fx * (1 - fy) * c10.blueF() + (1 - fx) * fy * c01.blueF() + fx * fy * c11.blueF()
+                af = (1 - fx) * (1 - fy) * c00.alphaF() + fx * (1 - fy) * c10.alphaF() + (1 - fx) * fy * c01.alphaF() + fx * fy * c11.alphaF()
+
+            if channel == "Red":
+                bright = rf
+            elif channel == "Green":
+                bright = gf
+            elif channel == "Blue":
+                bright = bf
+            elif channel == "Alpha":
+                bright = af
+            else:  # Grayscale (Luminance)
+                bright = 0.299 * rf + 0.587 * gf + 0.114 * bf
+
+            if invert:
+                bright = 1.0 - bright
+
+            z = min_h + bright * (max_h - min_h)
+            points.append(Point3D(x, y, z))
+            values.append(bright)
+            colors.append((rf, gf, bf))
+
+    faces: List[FaceData] = []
+    for j in range(count_v - 1):
+        for i in range(count_u - 1):
+            idx00 = j * count_u + i
+            idx10 = j * count_u + (i + 1)
+            idx11 = (j + 1) * count_u + (i + 1)
+            idx01 = (j + 1) * count_u + i
+
+            p0 = points[idx00]
+            p1 = points[idx10]
+            p2 = points[idx11]
+            p3 = points[idx01]
+
+            avg_c = (
+                (colors[idx00][0] + colors[idx10][0] + colors[idx11][0] + colors[idx01][0]) * 0.25,
+                (colors[idx00][1] + colors[idx10][1] + colors[idx11][1] + colors[idx01][1]) * 0.25,
+                (colors[idx00][2] + colors[idx10][2] + colors[idx11][2] + colors[idx01][2]) * 0.25
+            )
+            faces.append(FaceData(vertices=[p0, p1, p2, p3], color=avg_c))
+
+    mesh = MeshData(faces=faces, name="DisplacementMesh")
+    return points, values, colors, mesh, img_w, img_h, qimg
+
+
+@register_node
+class ImageFileNode(NodeBase):
+    name = "Image File"
+    category = "Input"
+    description = (
+        "Open and select an image file (PNG, JPG, BMP, WEBP, TIF).\n"
+        "Click '📂 Open Image...' on the node tile to browse.\n"
+        "Outputs the loaded QImage object, path, and dimensions."
+    )
+    header_color = "#5e81ac"
+
+    def setup_ports(self) -> None:
+        self.add_input("File Path", PortType.ANY, description="Optional path string", default_value="")
+        self.add_output("Image", PortType.ANY, "Loaded QImage object")
+        self.add_output("Path", PortType.ANY, "Absolute file path string")
+        self.add_output("Width", PortType.INTEGER, "Image width in pixels")
+        self.add_output("Height", PortType.INTEGER, "Image height in pixels")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            from PySide6.QtGui import QImage
+        except ImportError:
+            QImage = None
+        import os
+        in_path = self.get_input("File Path", "")
+        file_path = str(in_path) if in_path else self.widget_values.get("image_path", "")
+
+        qimg = None
+        if QImage is not None and file_path and os.path.exists(file_path):
+            qimg = QImage(file_path)
+
+        w = qimg.width() if qimg and not qimg.isNull() else 0
+        h = qimg.height() if qimg and not qimg.isNull() else 0
+
+        self.widget_values["_cached_qimage"] = qimg
+        self.set_output("Image", qimg)
+        self.set_output("Path", file_path)
+        self.set_output("Width", w)
+        self.set_output("Height", h)
+
+
+@register_node
+class ImagePreviewNode(NodeBase):
+    name = "Image Preview"
+    category = "Input"
+    description = (
+        "Displays a live visual image preview on the node tile on the canvas.\n"
+        "Connect an Image object or file path."
+    )
+    header_color = "#4c566a"
+
+    def setup_ports(self) -> None:
+        self.add_input("Image", PortType.ANY, description="QImage or file path string")
+        self.add_output("Image", PortType.ANY, "Pass-through QImage object")
+        self.add_output("Width", PortType.INTEGER, "Image width")
+        self.add_output("Height", PortType.INTEGER, "Image height")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            from PySide6.QtGui import QImage
+        except ImportError:
+            QImage = None
+        import os
+        val = self.get_input("Image", None)
+
+        qimg = None
+        if hasattr(val, "pixelColor"):
+            qimg = val
+        elif QImage is not None and isinstance(val, str) and val and os.path.exists(val):
+            qimg = QImage(val)
+        elif QImage is not None and self.widget_values.get("image_path"):
+            p = self.widget_values.get("image_path")
+            if os.path.exists(p):
+                qimg = QImage(p)
+
+        w = qimg.width() if qimg and not qimg.isNull() else 0
+        h = qimg.height() if qimg and not qimg.isNull() else 0
+
+        self.widget_values["_cached_qimage"] = qimg
+        self.set_output("Image", qimg)
+        self.set_output("Width", w)
+        self.set_output("Height", h)
+
+
+@register_node
+class ImageSamplerNode(NodeBase):
+    name = "Image Sampler"
+    category = "Input"
+    description = (
+        "Load an image file and create 3D heightfield displacement relief meshes, points, and values.\n"
+        "Supports live thumbnail preview, custom domains, and min/max displacement scale.\n"
+        "Outputs both a ready-to-bake 3D Mesh and point arrays."
+    )
+    header_color = "#3b4252"
+
+    def setup_ports(self) -> None:
+        self.add_input("Image", PortType.ANY, description="Image file path (str) or QImage", default_value="")
+        self.add_input("Domain U", PortType.NUMBER, description="Size along X", default_value=10.0)
+        self.add_input("Domain V", PortType.NUMBER, description="Size along Y", default_value=10.0)
+        self.add_input("Min", PortType.NUMBER, description="Minimum height", default_value=0.0)
+        self.add_input("Max", PortType.NUMBER, description="Displacement height scale", default_value=2.0)
+        self.add_input("Count U", PortType.INTEGER, description="Resolution along X", default_value=80)
+        self.add_input("Count V", PortType.INTEGER, description="Resolution along Y", default_value=80)
+
+        self.add_output("Mesh", PortType.MESH, "3D relief mesh")
+        self.add_output("Points", PortType.ANY, "Displaced 3D points (List[Point3D])")
+        self.add_output("Values", PortType.ANY, "Brightness / height values (0.0 to 1.0)")
+        self.add_output("Colors", PortType.ANY, "Sampled RGB colors")
+        self.add_output("Width", PortType.INTEGER, "Image pixel width")
+        self.add_output("Height", PortType.INTEGER, "Image pixel height")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        import os
+        raw_img = self.get_input("Image", None)
+        img_override = raw_img if hasattr(raw_img, "pixelColor") else None
+        img_path = str(raw_img) if isinstance(raw_img, str) and raw_img else self.widget_values.get("image_path", "")
+
+        dom_u = float(self.get_input("Domain U", 10.0))
+        dom_v = float(self.get_input("Domain V", 10.0))
+        min_h = float(self.get_input("Min", 0.0))
+        max_h = float(self.get_input("Max", 2.0))
+        cnt_u = int(self.get_input("Count U", 80))
+        cnt_v = int(self.get_input("Count V", 80))
+
+        invert = bool(self.widget_values.get("invert", False))
+        channel = str(self.widget_values.get("channel", "Grayscale"))
+        filter_mode = str(self.widget_values.get("filter", "Bilinear"))
+
+        pts, vals, cols, mesh, w, h, qimg = _sample_image_data(
+            image_path=img_path,
+            qimg_override=img_override,
+            domain_u=dom_u,
+            domain_v=dom_v,
+            min_h=min_h,
+            max_h=max_h,
+            count_u=cnt_u,
+            count_v=cnt_v,
+            invert=invert,
+            channel=channel,
+            filter_mode=filter_mode
+        )
+
+        self.widget_values["_cached_qimage"] = qimg
+        self.set_output("Mesh", mesh)
+        self.set_output("Points", pts)
+        self.set_output("Values", vals)
+        self.set_output("Colors", cols)
+        self.set_output("Width", w)
+        self.set_output("Height", h)
+
+
+@register_node
+class MeshFromPointsNode(NodeBase):
+    name = "Mesh From Points"
+    category = "Solids"
+    description = "Create a structured 3D quad surface mesh from an ordered 2D grid of 3D points."
+    header_color = "#b48ead"
+
+    def setup_ports(self) -> None:
+        self.add_input("Points", PortType.ANY, description="Grid points (List[Point3D])")
+        self.add_input("U Count", PortType.INTEGER, description="Points per row in U", default_value=10)
+        self.add_input("Closed U", PortType.BOOLEAN, description="Wrap mesh around U", default_value=False)
+        self.add_input("Closed V", PortType.BOOLEAN, description="Wrap mesh around V", default_value=False)
+        self.add_output("Mesh", PortType.MESH, "Generated 3D mesh")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        raw_pts = self.get_input("Points", [])
+        u_count = int(self.get_input("U Count", 10))
+        closed_u = bool(self.get_input("Closed U", False))
+        closed_v = bool(self.get_input("Closed V", False))
+
+        if not raw_pts or u_count < 2:
+            return
+
+        pts: List[Point3D] = []
+        for p in raw_pts:
+            if isinstance(p, Point3D):
+                pts.append(p)
+            elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                pts.append(Point3D(float(p[0]), float(p[1]), float(p[2])))
+
+        total = len(pts)
+        if total < u_count:
+            return
+
+        v_count = total // u_count
+        faces: List[FaceData] = []
+
+        num_u_segments = u_count if closed_u else (u_count - 1)
+        num_v_segments = v_count if closed_v else (v_count - 1)
+
+        for j in range(num_v_segments):
+            j_next = (j + 1) % v_count
+            for i in range(num_u_segments):
+                i_next = (i + 1) % u_count
+
+                idx00 = j * u_count + i
+                idx10 = j * u_count + i_next
+                idx11 = j_next * u_count + i_next
+                idx01 = j_next * u_count + i
+
+                p0 = pts[idx00]
+                p1 = pts[idx10]
+                p2 = pts[idx11]
+                p3 = pts[idx01]
+
+                faces.append(FaceData(vertices=[p0, p1, p2, p3], color=(0.85, 0.65, 0.3)))
+
+        self.set_output("Mesh", MeshData(faces=faces, name="GridMesh"))
+
