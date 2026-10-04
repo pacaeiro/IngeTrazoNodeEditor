@@ -9,7 +9,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsObject, QGraphicsProxyWidget,
-    QSlider, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QWidget, QHBoxLayout, QVBoxLayout, QLabel
+    QSlider, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+    QPushButton
 )
 
 from ..engine import NodeBase, Port, PortType
@@ -467,7 +468,6 @@ class NodeItem(QGraphicsObject):
             layout.addWidget(pte)
 
         elif t == "ReferenceFaceNode":
-            from PySide6.QtWidgets import QPushButton
             layout = QVBoxLayout(container)
             layout.setContentsMargins(8, 0, 8, 4)
             layout.setSpacing(3)
@@ -520,6 +520,9 @@ class NodeItem(QGraphicsObject):
             layout.addWidget(lbl_status)
 
         elif t == "ImageFileNode":
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(8, 0, 8, 4)
+            layout.setSpacing(3)
             btn = QPushButton("📂 Open Image...")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet("""
@@ -556,6 +559,9 @@ class NodeItem(QGraphicsObject):
             layout.addWidget(lbl_status)
 
         elif t in ("ImagePreviewNode", "ImageSamplerNode"):
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(8, 0, 8, 4)
+            layout.setSpacing(3)
             if t == "ImageSamplerNode":
                 row_btns = QHBoxLayout()
                 row_btns.setSpacing(4)
